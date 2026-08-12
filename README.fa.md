@@ -530,7 +530,7 @@ Candidate Capacity حافظهٔ streaming برای endpointهای امیدوار
 | `flowing-after-marker` | انتقال محدود درخواستی پس از مشاهدهٔ marker کامل شد |
 | `stable-after-marker` | اتصال پس از مشاهدهٔ marker از idle hold تعیین‌شده عبور کرد |
 
-**کلاینت TLS زنجیرهٔ گواهی، hostname، تاریخ‌ها، revocation یا امضای CertificateVerify را اعتبارسنجی نمی‌کند.** درست بودن `Finished`، اشتراک کلیدهای handshake را نشان می‌دهد؛ نه هویت کلادفلر و نه نبود interception را. برای مشاهدهٔ CDN، `cf-marker-observed` یا rung بالاتر مبتنی بر marker را لازم بدانید. `stable-after-marker` همچنان فقط دوام idle را اندازه می‌گیرد.
+**مرز TLS:** قنات برای اندازه‌گیری مسیر، handshake را کامل و پیام `Finished` را بررسی می‌کند؛ اما زنجیرهٔ اعتماد، تطابق hostname، تاریخ و وضعیت لغو گواهی و امضاهای احراز هویت TLS را اعتبارسنجی نمی‌کند. پس موفق شدن `handshake` به‌تنهایی هویت کلادفلر را ثابت نمی‌کند. نشانه‌های پاسخ کلادفلر جداگانه و روی همان اتصال HTTPS، از جمله از پاسخ `/cdn-cgi/trace`، بررسی می‌شوند.
 
 verdictهای شکست فقط observation را توصیف می‌کنند، نه سانسور یا علت آن. firewall، رفتار سرور، شلوغی، CGNAT، تغییر route، packet loss و مداخلهٔ فعال می‌توانند نشانه‌های مشابه بسازند. فیلدهای مستقل `failure_origin`، `transport_result`، `tls_outcome`، `sys_errno` و `reason` evidence طبقه‌بندی را نگه می‌دارند.
 
