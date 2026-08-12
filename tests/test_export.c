@@ -119,6 +119,7 @@ static void init_cf(cf_scan *cf, qn_config *cfg, cf_record rec[3])
     cfg->scan_plan.memory_budget_bytes = 256u * 1024u * 1024u;
     cfg->scan_plan.estimated_candidate_bytes = 32u * 1024u * 1024u;
     cfg->scan_plan.estimated_verifier_bytes = 4u * 1024u * 1024u;
+    cfg->scan_plan.estimated_tunnel_bytes = 2u * 1024u * 1024u;
     cfg->scan_plan.estimated_working_bytes = 8u * 1024u * 1024u;
     cfg->scan_plan.estimated_total_bytes = 44u * 1024u * 1024u;
     cfg->scan_plan.fd_limit = 1024u;
@@ -166,6 +167,12 @@ static void init_cf(cf_scan *cf, qn_config *cfg, cf_record rec[3])
     rec[1].verified = 1u;
     rec[1].rtt_p90_us = 12345u;
     rec[1].tls_outcome = QN_TLS_SERVERHELLO;
+    rec[1].tunnel_state = QN_TUNNEL_PASSED;
+    rec[1].tunnel_attempts = 1u;
+    rec[1].tunnel_ttfb_us = 21000u;
+    rec[1].tunnel_kbps = 900u;
+    qn_strlcpy(rec[1].tunnel_reason, "verified",
+               sizeof rec[1].tunnel_reason);
     rec[2].highest_rung_reached = QN_RUNG_STABLE;
     rec[2].terminal_outcome = QN_TERM_SUCCESS;
     rec[2].verified = 1u;
@@ -194,7 +201,7 @@ static void test_json_and_template(void)
     body = read_all(json_path);
     CHECK(body != NULL);
     if (body) {
-        CHECK(strstr(body, "\"schema\": 6") != NULL);
+        CHECK(strstr(body, "\"schema\": 7") != NULL);
         CHECK(strstr(body, "\"build_fingerprint\":") != NULL);
         CHECK(strstr(body, "\"result_scope\": \"best-observed-among-scanned-addresses\"") != NULL);
         CHECK(strstr(body, "\"candidate_capacity\": 65536") != NULL);
@@ -203,7 +210,9 @@ static void test_json_and_template(void)
         CHECK(strstr(body, "\"verify_concurrency\": 32") != NULL);
         CHECK(strstr(body, "\"estimated_working_bytes\": 8388608") != NULL);
         CHECK(strstr(body, "\"support\": \"capability-constrained\"") != NULL);
-        CHECK(strstr(body, "\"score_version\": 2") != NULL);
+        CHECK(strstr(body, "\"score_version\": 3") != NULL);
+        CHECK(strstr(body, "\"tunnel_status\": \"passed\"") != NULL);
+        CHECK(strstr(body, "\"tunnel_ttfb_us\": 21000") != NULL);
         CHECK(strstr(body, "\"highest_rung_reached\": \"stable-after-marker\"") != NULL);
         CHECK(strstr(body, "\"terminal_outcome\": \"success\"") != NULL);
         CHECK(strstr(body, "\"unique_addresses\": 1524736") != NULL);
@@ -240,8 +249,26 @@ static void test_json_and_template(void)
         CHECK(strstr(body, "203.0.113.30") != NULL);
         CHECK(strstr(body, "192.0.2.10") == NULL);
         CHECK(strstr(body, "REPLACE_UUID") != NULL);
+        CHECK(strstr(body, "\"configs\": [") != NULL);
         free(body);
     }
+
+    cfg.tunnel_link =
+        "vless://123e4567-e89b-12d3-a456-426614174000@origin.example:443?"
+        "type=ws&security=tls&sni=sni.example&host=host.example&path=%2Fedge";
+    CHECK(qn_export_config(xray_path, 1u, &cf) == QN_RUN_SUCCESS);
+    body = read_all(xray_path);
+    CHECK(body != NULL);
+    if (body) {
+        CHECK(strstr(body, "123e4567-e89b-12d3-a456-426614174000") == NULL);
+        CHECK(strstr(body, "<redacted>") != NULL);
+        CHECK(strstr(body, "REPLACE_UUID") == NULL);
+        CHECK(strstr(body, "\"address\":\"198.51.100.20\"") != NULL);
+        CHECK(strstr(body, "sni.example") != NULL);
+        CHECK(strstr(body, "host.example") != NULL);
+        free(body);
+    }
+    cfg.tunnel_link = NULL;
 
     cfg.sni = "www.cloudflare.com";
     CHECK(qn_export_config(xray_path, 1u, &cf) == QN_RUN_SUCCESS);
@@ -268,7 +295,7 @@ static void test_json_and_template(void)
     body = read_all(empty_json_path);
     CHECK(body != NULL);
     if (body) {
-        CHECK(strstr(body, "\"outbounds\": []") != NULL);
+        CHECK(strstr(body, "\"configs\": []") != NULL);
         CHECK(body[0] == '{');
         free(body);
     }
@@ -279,7 +306,7 @@ static void test_json_and_template(void)
     body = read_all(empty_json_path);
     CHECK(body != NULL);
     if (body) {
-        CHECK(strstr(body, "\"outbounds\": []") != NULL);
+        CHECK(strstr(body, "\"configs\": []") != NULL);
         CHECK(strstr(body, "198.51.100.20") == NULL);
         free(body);
     }
@@ -291,7 +318,7 @@ static void test_json_and_template(void)
     body = read_all(empty_json_path);
     CHECK(body != NULL);
     if (body) {
-        CHECK(strstr(body, "\"outbounds\": []") != NULL);
+        CHECK(strstr(body, "\"configs\": []") != NULL);
         free(body);
     }
 
@@ -333,7 +360,7 @@ static void test_host_icmp_outcome_is_exported(void)
     body = read_all(path);
     CHECK(body != NULL);
     if (body) {
-        CHECK(strstr(body, "\"schema\": 6") != NULL);
+        CHECK(strstr(body, "\"schema\": 7") != NULL);
         CHECK(strstr(body, "\"requested\": true") != NULL);
         CHECK(strstr(body, "\"outcome\": \"failed\"") != NULL);
         CHECK(strstr(body, "\"errno\": 13") != NULL);

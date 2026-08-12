@@ -7,7 +7,8 @@
 #include "qanat/tls.h"
 
 #define QN_PROFILE_MAX_H2_SETTINGS 6u
-#define QN_PROFILE_INSTANCE_VERSION 1u
+#define QN_PROFILE_MAX_HEADERS     12u
+#define QN_PROFILE_INSTANCE_VERSION 2u
 
 typedef qn_tls_fp qn_tls_hello_profile;
 
@@ -30,17 +31,33 @@ typedef enum {
 } qn_pseudo_header;
 
 typedef enum {
-    QN_HEADER_USER_AGENT = 0,
+    QN_HEADER_CONNECTION = 0,
+    QN_HEADER_USER_AGENT,
     QN_HEADER_ACCEPT,
-    QN_HEADER_ACCEPT_ENCODING
+    QN_HEADER_ACCEPT_ENCODING,
+    QN_HEADER_ACCEPT_LANGUAGE,
+    QN_HEADER_UPGRADE_INSECURE,
+    QN_HEADER_SEC_FETCH_DEST,
+    QN_HEADER_SEC_FETCH_MODE,
+    QN_HEADER_SEC_FETCH_SITE,
+    QN_HEADER_SEC_FETCH_USER,
+    QN_HEADER_SEC_CH_UA,
+    QN_HEADER_SEC_CH_UA_MOBILE,
+    QN_HEADER_SEC_CH_UA_PLATFORM,
+    QN_HEADER_PRIORITY,
+    QN_HEADER_TE
 } qn_regular_header;
 
 typedef struct {
     const char *user_agent;
     const char *accept;
     const char *accept_encoding;
+    const char *accept_language;
+    const char *sec_fetch_site;
+    const char *sec_ch_ua;
     uint8_t     pseudo_order[4];
-    uint8_t     header_order[3];
+    uint8_t     header_order[QN_PROFILE_MAX_HEADERS];
+    uint8_t     nheaders;
 } qn_http_header_profile;
 
 typedef struct qn_client_profile {
@@ -72,7 +89,8 @@ typedef struct qn_profile_instance {
     size_t                    h2_settings_n;
     uint32_t                  h2_connection_window;
     uint8_t                   h2_pseudo_order[4];
-    uint8_t                   http1_header_order[3];
+    uint8_t                   http1_header_order[QN_PROFILE_MAX_HEADERS];
+    size_t                    http1_header_order_n;
     bool                      allow_tls12;
     bool                      cert_strict;
 } qn_profile_instance;
@@ -83,7 +101,9 @@ bool qn_profile_h2_shape(const qn_client_profile *profile, uint64_t seed,
                          qn_h2_setting *settings, size_t settings_cap,
                          size_t *settings_n, uint32_t *connection_window);
 bool qn_profile_http_shape(const qn_client_profile *profile, uint64_t seed,
-                           uint8_t pseudo_order[4], uint8_t header_order[3]);
+                           uint8_t pseudo_order[4],
+                           uint8_t header_order[QN_PROFILE_MAX_HEADERS],
+                           size_t *header_order_n);
 
 bool qn_profile_instance_init(qn_profile_instance *instance, qn_tls_fp requested,
                               uint64_t seed, const char *sni, bool allow_tls12,

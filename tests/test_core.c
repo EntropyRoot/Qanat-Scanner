@@ -601,6 +601,24 @@ static void test_statistics(void)
     CHECK(ranked[1].score_latency != 0u);
     CHECK(ranked[1].score_stability != 0u);
 
+    {
+        cf_record passed = ranked[1];
+        cf_record untested = ranked[1];
+        cf_record failed = ranked[1];
+
+        passed.tunnel_state = QN_TUNNEL_PASSED;
+        untested.tunnel_state = QN_TUNNEL_UNTESTED;
+        failed.tunnel_state = QN_TUNNEL_NO_MARKER;
+        qn_cf_finalize_rank(&passed, QN_RANK_BALANCED);
+        qn_cf_finalize_rank(&untested, QN_RANK_BALANCED);
+        qn_cf_finalize_rank(&failed, QN_RANK_BALANCED);
+        CHECK(passed.score > untested.score);
+        CHECK(untested.score > failed.score);
+        CHECK(passed.score_tunnel == 30000u);
+        CHECK(untested.score_tunnel == 15000u);
+        CHECK(failed.score_tunnel == 0u);
+    }
+
     ranked[0] = ranked[1];
     ranked[0].addr.u.v4 = 0xC0000202u;
     ranked[1].addr.u.v4 = 0xC0000201u;
@@ -622,7 +640,7 @@ static void test_protocols(void)
     static const uint8_t truncated[] = { 0x16u, 0x03u, 0x03u, 0x00u, 42u, 0x02u };
     qn_http_reply reply;
     qn_rng        rng;
-    uint8_t       request[512];
+    uint8_t       request[QN_PROBE_BUF];
     uint8_t       hello[QN_PROBE_BUF];
     int           n;
 
@@ -730,7 +748,7 @@ static size_t h2_frame(uint8_t *out, uint8_t type, uint8_t flags, uint32_t strea
 static void test_http2(void)
 {
     static const uint8_t trace[] = "fl=1\ncolo=FRA\n";
-    uint8_t     wire[256], out[256], ctl[64], ping[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    uint8_t     wire[256], out[2048], ctl[64], ping[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
     qn_h2       h;
     qn_h2_event ev;
     size_t      n, cn;
@@ -1301,8 +1319,8 @@ static void test_http2_advertises_parser_capacity(void)
 
     CHECK(n > 0);
     CHECK(preface[24 + 9 + 18] == 0u && preface[24 + 9 + 19] == 6u);
-    CHECK(preface[24 + 9 + 20] == 0u && preface[24 + 9 + 21] == 0u);
-    CHECK(preface[24 + 9 + 22] == 0x20u && preface[24 + 9 + 23] == 0u);
+    CHECK(preface[24 + 9 + 20] == 0u && preface[24 + 9 + 21] == 4u);
+    CHECK(preface[24 + 9 + 22] == 0u && preface[24 + 9 + 23] == 0u);
 }
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)

@@ -121,6 +121,14 @@ bool qn_x25519(uint8_t out[QN_X25519_LEN], const uint8_t sk[QN_X25519_LEN],
                const uint8_t peer[QN_X25519_LEN]);
 bool qn_x25519_keypair(uint8_t sk[QN_X25519_LEN], uint8_t pk[QN_X25519_LEN], qn_rng *rng);
 
+#define QN_P256_SECRET_LEN 32
+#define QN_P256_PUBLIC_LEN 65
+
+bool qn_p256_keypair(uint8_t sk[QN_P256_SECRET_LEN], uint8_t pk[QN_P256_PUBLIC_LEN],
+                     qn_rng *rng);
+bool qn_p256(uint8_t out[QN_P256_SECRET_LEN], const uint8_t sk[QN_P256_SECRET_LEN],
+             const uint8_t peer[QN_P256_PUBLIC_LEN]);
+
 /* Runtime CPU dispatch; the scalar C paths stay as the fallback. */
 bool qn_cpu_has_aes(void);
 bool qn_cpu_has_pmull(void);

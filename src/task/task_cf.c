@@ -989,6 +989,243 @@ bool cf_scan_verify(cf_scan *s)
     return true;
 }
 
+typedef struct {
+    cf_scan            *scan;
+    qn_tunnel_link      link;
+    char                xray[QN_TUNNEL_XRAY_PATH_MAX + 1u];
+    uint32_t           *selected;
+    uint32_t            count;
+    _Atomic uint32_t    next;
+} tunnel_work;
+
+static void commit_tunnel_result(tunnel_work *work, uint32_t index,
+                                 const qn_tunnel_result *result)
+{
+    cf_scan *scan = work->scan;
+    cf_record *record;
+
+    if (scan->records_lock_live)
+        pthread_mutex_lock(&scan->records_lock);
+    record = &scan->rec[index];
+    record->tunnel_state = (uint8_t)result->state;
+    record->tunnel_attempts = result->attempts;
+    record->tunnel_ttfb_us = result->ttfb_us;
+    record->tunnel_kbps = result->kbps;
+    qn_strlcpy(record->tunnel_reason, result->reason,
+               sizeof record->tunnel_reason);
+    if (scan->records_lock_live)
+        pthread_mutex_unlock(&scan->records_lock);
+    if (result->state == QN_TUNNEL_PASSED)
+        atomic_fetch_add_explicit(&scan->tunnel_passed, 1u, memory_order_relaxed);
+    else if (qn_tunnel_state_skipped(result->state))
+        atomic_fetch_add_explicit(&scan->tunnel_skipped, 1u, memory_order_relaxed);
+    else
+        atomic_fetch_add_explicit(&scan->tunnel_failed, 1u, memory_order_relaxed);
+}
+
+static void *tunnel_worker(void *argument)
+{
+    tunnel_work *work = (tunnel_work *)argument;
+    cf_scan *scan = work->scan;
+
+    for (;;) {
+        uint32_t item = atomic_fetch_add_explicit(&work->next, 1u,
+                                                   memory_order_relaxed);
+        uint32_t index;
+        char candidate[QN_ADDRSTRLEN];
+        qn_tunnel_run_config config;
+        qn_tunnel_result result;
+
+        if (item >= work->count)
+            break;
+        index = work->selected[item];
+        qn_addr_str(&scan->rec[index].addr, candidate, sizeof candidate);
+        memset(&config, 0, sizeof config);
+        config.link = &work->link;
+        config.xray_path = work->xray;
+        config.candidate = candidate;
+        config.probe_host = "www.cloudflare.com";
+        config.probe_path = "/cdn-cgi/trace";
+        config.profile = scan->cfg->profile_instance;
+        config.fingerprint = scan->cfg->fingerprint;
+        config.allow_tls12 = true;
+        config.cert_strict = scan->cfg->cert_strict;
+        config.timeout_ms = QN_MAX(scan->cfg->timeout_ms, 1000u);
+        config.idle_ms = 0u;
+        config.want_bytes = 0u;
+        config.max_attempts = (uint8_t)scan->cfg->scan_plan.tunnel_attempts;
+        config.seed = scan->cfg->effective_seed + item;
+        config.cancel = scan->cancel;
+        (void)qn_tunnel_run(&config, &result);
+        commit_tunnel_result(work, index, &result);
+    }
+    return NULL;
+}
+
+static void log_tunnel_events(cf_scan *scan, const tunnel_work *work)
+{
+    FILE *file;
+
+    if (!scan->cfg->event_log)
+        return;
+    file = fopen(scan->cfg->event_log, "a");
+    if (!file) {
+        io_failed(scan, "event log", scan->cfg->event_log);
+        return;
+    }
+    for (uint32_t item = 0u; item < work->count; item++) {
+        const cf_record *record = &scan->rec[work->selected[item]];
+        char address[QN_ADDRSTRLEN];
+        char reason[sizeof record->tunnel_reason];
+
+        qn_addr_str(&record->addr, address, sizeof address);
+        log_field(reason, sizeof reason, record->tunnel_reason);
+        fprintf(file, "tunnel\t%s\t%s\t%u\t%u\t%u\t%s\n", address,
+                qn_tunnel_state_str((qn_tunnel_state)record->tunnel_state),
+                record->tunnel_attempts, record->tunnel_ttfb_us,
+                record->tunnel_kbps, reason);
+    }
+    {
+        bool wrote = ferror(file) == 0;
+
+        if (fclose(file) != 0 || !wrote)
+            io_failed(scan, "event log", scan->cfg->event_log);
+    }
+}
+
+static uint32_t select_tunnel_candidates(cf_scan *scan, uint32_t *selected,
+                                         uint32_t capacity)
+{
+    uint32_t count = 0u;
+
+    for (uint32_t i = 0u; i < scan->n && count < capacity; i++) {
+        qn_classification classification = qn_cf_record_classification(&scan->rec[i]);
+
+        if (scan->rec[i].verified && qn_classification_has_marker(classification))
+            selected[count++] = i;
+    }
+    return count;
+}
+
+qn_run_outcome cf_scan_tunnel(cf_scan *scan)
+{
+    tunnel_work work;
+    qn_tunnel_parse_code parse_code;
+    qn_xray_find_code find_code;
+    pthread_t *threads = NULL;
+    uint32_t workers;
+    uint32_t created = 0u;
+
+    if (!scan || !scan->cfg || !scan->cfg->scan_plan.tunnel_enabled)
+        return QN_RUN_SUCCESS;
+    memset(&work, 0, sizeof work);
+    work.scan = scan;
+    atomic_store_explicit(&scan->tunnel_queued, 0u, memory_order_release);
+    atomic_store_explicit(&scan->tunnel_passed, 0u, memory_order_release);
+    atomic_store_explicit(&scan->tunnel_failed, 0u, memory_order_release);
+    atomic_store_explicit(&scan->tunnel_skipped, 0u, memory_order_release);
+    atomic_store_explicit(&scan->tunnel_active, true, memory_order_release);
+    scan->tunnel_outcome = QN_RUN_INCOMPLETE;
+    parse_code = qn_tunnel_link_parse_cstr(scan->cfg->tunnel_link, &work.link);
+    if (parse_code != QN_TUNNEL_PARSE_OK) {
+        atomic_store_explicit(&scan->tunnel_active, false,
+                              memory_order_release);
+        scan->tunnel_outcome = QN_RUN_FAILED;
+        return QN_RUN_FAILED;
+    }
+    find_code = qn_xray_find(scan->cfg->xray_path, work.xray, sizeof work.xray);
+    work.selected = (uint32_t *)calloc((size_t)scan->cfg->scan_plan.tunnel_target,
+                                       sizeof *work.selected);
+    if (!work.selected) {
+        qn_tunnel_link_clear(&work.link);
+        atomic_store_explicit(&scan->tunnel_active, false,
+                              memory_order_release);
+        scan->tunnel_outcome = QN_RUN_FAILED;
+        return QN_RUN_FAILED;
+    }
+    if (scan->records_lock_live)
+        pthread_mutex_lock(&scan->records_lock);
+    for (uint32_t i = 0u; i < scan->n; i++)
+        qn_cf_finalize_rank(&scan->rec[i], scan->cfg->scan_plan.rank_by);
+    qn_cf_sort(scan->rec, scan->n);
+    work.count = select_tunnel_candidates(
+        scan, work.selected, (uint32_t)scan->cfg->scan_plan.tunnel_target);
+    for (uint32_t i = 0u; i < work.count; i++) {
+        scan->rec[work.selected[i]].tunnel_state = QN_TUNNEL_QUEUED;
+        qn_strlcpy(scan->rec[work.selected[i]].tunnel_reason, "queued",
+                   sizeof scan->rec[work.selected[i]].tunnel_reason);
+    }
+    if (scan->records_lock_live)
+        pthread_mutex_unlock(&scan->records_lock);
+    atomic_store_explicit(&scan->tunnel_queued, work.count, memory_order_release);
+    if (!work.count) {
+        free(work.selected);
+        qn_tunnel_link_clear(&work.link);
+        atomic_store_explicit(&scan->tunnel_active, false,
+                              memory_order_release);
+        scan->tunnel_outcome = QN_RUN_INCOMPLETE;
+        return QN_RUN_INCOMPLETE;
+    }
+    if (find_code != QN_XRAY_FOUND) {
+        qn_tunnel_result result;
+
+        memset(&result, 0, sizeof result);
+        result.state = find_code == QN_XRAY_NOT_FOUND ? QN_TUNNEL_BINARY_MISSING
+                                                       : QN_TUNNEL_CONFIG_INVALID;
+        qn_strlcpy(result.reason, qn_xray_find_str(find_code), sizeof result.reason);
+        for (uint32_t i = 0u; i < work.count; i++)
+            commit_tunnel_result(&work, work.selected[i], &result);
+        log_tunnel_events(scan, &work);
+        free(work.selected);
+        qn_tunnel_link_clear(&work.link);
+        atomic_store_explicit(&scan->tunnel_active, false,
+                              memory_order_release);
+        scan->tunnel_outcome = find_code == QN_XRAY_NOT_FOUND
+                                   ? QN_RUN_INCOMPLETE : QN_RUN_FAILED;
+        return scan->tunnel_outcome;
+    }
+    workers = QN_MIN(scan->cfg->scan_plan.tunnel_concurrency, work.count);
+    threads = (pthread_t *)calloc(workers, sizeof *threads);
+    if (!threads) {
+        qn_tunnel_result result;
+
+        memset(&result, 0, sizeof result);
+        result.state = QN_TUNNEL_START_FAILED;
+        qn_strlcpy(result.reason, "worker-allocation", sizeof result.reason);
+        for (uint32_t i = 0u; i < work.count; i++)
+            commit_tunnel_result(&work, work.selected[i], &result);
+        log_tunnel_events(scan, &work);
+        free(work.selected);
+        qn_tunnel_link_clear(&work.link);
+        atomic_store_explicit(&scan->tunnel_active, false,
+                              memory_order_release);
+        scan->tunnel_outcome = QN_RUN_FAILED;
+        return QN_RUN_FAILED;
+    }
+    for (; created < workers; created++)
+        if (pthread_create(&threads[created], NULL, tunnel_worker, &work) != 0)
+            break;
+    for (uint32_t i = 0u; i < created; i++)
+        pthread_join(threads[i], NULL);
+    if (created < workers) {
+        tunnel_worker(&work);
+        scan->tunnel_outcome = QN_RUN_FAILED;
+    } else if (scan->cancel && atomic_load_explicit(scan->cancel, memory_order_acquire)) {
+        scan->tunnel_outcome = QN_RUN_CANCELLED;
+    } else if (atomic_load_explicit(&scan->tunnel_passed,
+                                    memory_order_acquire) == work.count) {
+        scan->tunnel_outcome = QN_RUN_SUCCESS;
+    } else {
+        scan->tunnel_outcome = QN_RUN_INCOMPLETE;
+    }
+    log_tunnel_events(scan, &work);
+    free(threads);
+    free(work.selected);
+    qn_tunnel_link_clear(&work.link);
+    atomic_store_explicit(&scan->tunnel_active, false, memory_order_release);
+    return scan->tunnel_outcome;
+}
+
 void cf_scan_finish(cf_scan *s)
 {
     if (s->records_lock_live)

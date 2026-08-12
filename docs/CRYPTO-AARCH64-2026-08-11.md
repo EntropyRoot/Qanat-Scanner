@@ -485,6 +485,7 @@ adb reverse --remove tcp:9443
 | `tests/bench_crypto.c` | calibrated microbenchmarks and dispatch diagnostics |
 | `tests/bench_tls_verify.c` | full verifier wall/CPU/handshake benchmark |
 | `tests/tls_bench_server.py` | deterministic local TLS 1.3 HTTP/1.1 fixture |
+| `docs/REVIEW-2026-08-10.md` | update the AES-192 policy statement |
 | `docs/CRYPTO-AARCH64-DISASSEMBLY-2026-08-11.md` | annotated generated-code review |
 
 ## Independent review, 2026-08-11

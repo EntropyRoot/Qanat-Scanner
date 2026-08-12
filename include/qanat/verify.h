@@ -7,6 +7,7 @@
 #include "qanat/outcome.h"
 #include "qanat/profile.h"
 #include "qanat/tls.h"
+#include "qanat/tunnel.h"
 
 /* Full TLS sessions use a separate bounded verifier over the finalist set. */
 
@@ -54,6 +55,11 @@ typedef struct {
     /* Refuse a compressed certificate rather than accept it opaquely. */
     bool        cert_strict;
     uint16_t    port;
+    bool        socks_enabled;
+    qn_addr     socks_address;
+    uint16_t    socks_port;
+    const char *socks_target_host;
+    uint16_t    socks_target_port;
     uint32_t    concurrency;
     uint32_t    stability_concurrency;
     uint32_t    timeout_ms;

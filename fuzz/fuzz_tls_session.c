@@ -8,22 +8,28 @@
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    static qn_tls_session s;
+    static qn_tls_session initial, s;
     static uint8_t        out[8192], app[16384], hello[4096];
-    qn_tls_config         cfg;
-    qn_rng                rng;
+    static bool           prepared;
     size_t                off = 0;
 
-    qn_rng_seed(&rng, 0x51A7E5u);
-    memset(&cfg, 0, sizeof cfg);
-    cfg.sni         = "example.com";
-    cfg.fp          = QN_TLS_FP_CHROME;
-    cfg.allow_tls12 = true;
-    cfg.rng         = &rng;
+    if (!prepared) {
+        qn_tls_config cfg;
+        qn_rng        rng;
 
-    qn_tls_init(&s, &cfg);
-    if (qn_tls_start(&s, hello, sizeof hello) <= 0)
-        return 0;
+        qn_rng_seed(&rng, 0x51A7E5u);
+        memset(&cfg, 0, sizeof cfg);
+        cfg.sni         = "example.com";
+        cfg.fp          = QN_TLS_FP_CHROME;
+        cfg.allow_tls12 = true;
+        cfg.rng         = &rng;
+        qn_tls_init(&initial, &cfg);
+        if (qn_tls_start(&initial, hello, sizeof hello) <= 0)
+            __builtin_trap();
+        initial.cfg.rng = NULL;
+        prepared = true;
+    }
+    memcpy(&s, &initial, sizeof s);
 
     /* Chunk boundaries come from the input too, so record splits get explored. */
     while (off < size) {

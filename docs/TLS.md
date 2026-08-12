@@ -10,8 +10,10 @@ The bounded client supports the handshake shapes Qanat needs:
 
 - TLS 1.3 with AES-128-GCM-SHA256, AES-256-GCM-SHA384, and ChaCha20-Poly1305-SHA256;
 - TLS 1.2 ECDHE with AES-GCM or ChaCha20-Poly1305 and RSA or ECDSA authentication framing;
-- X25519 ephemeral key agreement;
+- X25519MLKEM768, X25519, and P-256 ephemeral key agreement;
 - ALPN negotiation for `h2` and `http/1.1`;
+- bounded ALPS HTTP/2 SETTINGS and RFC 9849 ECH retry-config parsing;
+- profile-specific RFC 8879 certificate-compression offers and framing;
 - versioned Chrome Android, Firefox Android, Safari iOS, and randomized
   ClientHello profiles;
 - JA3 and JA4 calculation over the emitted ClientHello;
@@ -19,7 +21,9 @@ The bounded client supports the handshake shapes Qanat needs:
 - transcript hashing, key derivation, and peer `Finished` verification;
 - leaf-certificate subject and issuer extraction for display only.
 
-Unsupported protocol states are rejected for the measurement rather than partially emulated. HelloRetryRequest is currently reported as unsupported, and only the offered key-exchange and AEAD families are accepted.
+HelloRetryRequest is implemented for supported alternate groups with bounded
+cookies and RFC transcript reconstruction. A valid selection outside the
+bounded executor is reported as typed `unsupported`, not partial success.
 
 ## What Is Not Authenticated
 
@@ -34,6 +38,14 @@ Qanat does not verify:
 - whether an interception endpoint terminated the connection.
 
 Certificate messages and signatures are checked only enough to preserve bounded framing and handshake order. Subject and issuer text is diagnostic metadata, not verified identity.
+
+Compressed certificates are not decompressed. Their algorithm must have been
+offered by the active profile and their declared lengths must be bounded and
+exact. The default measurement path records an opaque certificate and can
+still verify the transcript `Finished`; `--cert-strict` refuses that path.
+RFC 8879 makes the ClientHello extension unidirectional, so no selection is
+expected in `EncryptedExtensions`; the algorithm is carried by the
+`CompressedCertificate` message itself.
 
 ## What `Finished` Proves
 
@@ -78,13 +90,20 @@ NewSessionTicket is accepted only in the legal post-handshake sequence.
 
 ## Randomness
 
-Normal ephemeral material is requested through the Linux `getrandom` system call, with `/dev/urandom` as a fallback. If both fail, the scanner has a last-resort process PRNG so a measurement can still terminate; that path is not suitable for secrecy.
+Normal full-handshake ephemeral material uses Linux `getrandom`, with
+`/dev/urandom` as fallback; the handshake fails if both are unavailable.
+Scheduling and cheap-screen randomness may use the documented process fallback,
+which is not a source of cryptographic secrecy.
 
 When `--seed` is supplied, Qanat deliberately uses reproducible PRNG output for the handshake. This helps audit probe ordering and output, but it removes cryptographic unpredictability. That is acceptable only because the connection protects no application secret.
 
 ## Cryptographic Implementation
 
-The repository contains scalar C implementations of SHA-2, HMAC, HKDF, the TLS 1.2 PRF, X25519, AES-GCM, ChaCha20-Poly1305, and MD5 for JA3 only. AArch64 builds can dispatch at runtime to hand-written AES/PMULL, SHA-256, and NEON ChaCha20 paths.
+The repository contains C implementations of SHA-2, HMAC, HKDF, the TLS 1.2
+PRF, X25519, P-256, ML-KEM-768, AES-GCM, ChaCha20-Poly1305, and MD5 for JA3
+only. ML-KEM uses the pinned `mlkem-native` source and P-256 uses a pinned
+portable `micro-ecc` subset. AArch64 dispatches supported crypto operations to
+the tested assembly backends at runtime.
 
 The code uses constant-shape comparison for authentication tags and wipes selected temporary secrets, but it is not hardened as a general cryptographic library:
 
@@ -109,8 +128,9 @@ is not. The trace body remains the primary edge marker.
 
 The source tree defines:
 
-- known-answer tests for SHA-2, HMAC, HKDF, TLS key derivation, AES-GCM, ChaCha20-Poly1305, and X25519;
-- ClientHello shape and JA3/JA4 checks;
+- known-answer tests for the symmetric primitives, X25519, P-256, and ML-KEM-768;
+- exact Chrome 151, Firefox 153, and Safari 26 ClientHello shape checks;
+- an offline hybrid ServerHello with real ML-KEM encapsulation and decapsulation;
 - malformed and out-of-order ServerHello tests;
 - a local OpenSSL TLS 1.2/1.3 handshake matrix across supported cipher families and browser profiles;
 - an adversarial loopback peer for refused, reset, silence, non-TLS, early-EOF, and byte-drip behavior;
@@ -121,28 +141,46 @@ The source tree defines:
 
 These are valuable engineering controls. They do not amount to an independent security audit, and their presence does not prove that every platform or network path has been exercised.
 
-## Cross-layer fingerprint contract, 2026-08-11
+## Cross-layer fingerprint contract, 2026-08-12
 
 The current implementation instantiates one immutable `qn_profile_instance`
-per run from profile, seed, SNI, and certificate policy. Fingerprint preview,
-wire ClientHello, verifier, H2/H1 request builders, and export all consume that
-same instance. Random mode therefore creates one coherent cross-layer persona,
-and GREASE is materialized once rather than re-randomized by each consumer.
+per run from profile, seed, SNI, and certificate policy. TLS, H2, H1, preview,
+verifier, and export consume that persona. A connection seed then materializes
+fresh GREASE, Chrome extension order, ECH padding, randoms, and key material.
+An explicit run seed and connection index reproduce the same wire instance.
 
-Every built-in profile is capability-constrained. A ClientHello advertises only
-TLS versions, cipher suites, signature algorithms, groups, key shares, ALPN
-paths, and retry behavior that this bounded client implements. A requested
-shape that cannot be completed is reported unsupported instead of serialized as
-a plausible fingerprint. For identical profile, seed, and SNI,
-`fingerprint show` and the verifier call the same ClientHello wire builder.
+Every built-in profile is capability-constrained. Its offer mirrors the sampled
+browser, including some legacy branches beyond this measurement client. The
+builder requires a viable implemented TLS 1.3 path; if a peer selects another
+branch, the handshake returns typed `unsupported`. Preview, cheap screening,
+and deep verification all call the same ClientHello wire builder.
 
 `qn_client_profile` is not a TLS-only label. One versioned profile controls the
 ClientHello, H2 SETTINGS order/values, connection window, pseudo-header order,
 regular-header order, User-Agent, Accept, Accept-Encoding, and HTTP/1 request.
-The fixed names are `chrome-android-126`, `firefox-android-127`, and
-`safari-ios-17`; aliases remain accepted for compatibility. `random`
+The fixed names are `chrome-android-151`, `firefox-android-153`, and
+`safari-ios-26`; short and previous versioned aliases remain accepted. `random`
 materializes a seeded randomized TLS and HTTP/H2 shape rather than selecting a
 fixed profile.
+
+### Reference evidence
+
+The [Android ClientHello fixture](evidence/android-clienthello-2026-08-12.json)
+and [HTTP/1 fixture](evidence/android-http1-2026-08-12.json) came from controlled
+localhost navigation on the connected Xiaomi phone. They retain ordered protocol
+facts only; randoms, keys, session material, cookies, history, and non-local URLs
+are excluded. Chrome and Firefox are therefore device-sampled. Safari is based
+on current source/reference material and is not claimed as an iPhone capture.
+
+The [Cloudflare interoperability record](evidence/cloudflare-tls-2026-08-12.json)
+is a separate direct Qanat test to `speed.cloudflare.com`; it did not use the
+phone collector or a proxy. All three profiles completed TLS 1.3, negotiated the
+X25519MLKEM768 group (`0x11ec`), and received HTTP 200. The endpoint selected
+HTTP/1.1 for Qanat and for an OpenSSL ALPN reference in that test.
+Cloudflare returned a valid ECH retry-config list and a Brotli-compressed
+certificate to the Chrome and Firefox shapes; both were structurally accepted
+and completed the request. Safari received an uncompressed certificate in the
+recorded run.
 
 `qanat fingerprint show PROFILE` prints the ClientHello hex, JA3 string/hash,
 JA4, H2 settings/window/order, H2 request hex, HTTP/1 request hex, and header

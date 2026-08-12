@@ -80,10 +80,10 @@
 مسیر اندازه‌گیری کرد.
 
 اسکنرهای عمومی و ابزارهای نوشته‌شده با زبان‌های سطح بالا می‌توانند برای کار
-خودشان کاملاً مناسب باشند؛ البته با سرعت و کارایی کمتر و به علاوه مسئله این است که مدل اجرایی بسیاری از آن‌ها برای
+خودشان کاملاً مناسب باشند؛ مسئله این است که مدل اجرایی بسیاری از آن‌ها برای
 گوشی طراحی نشده است. در سوی دیگر، ابزارهای قدرتمند دسکتاپ مانند ZMap و masscan
 معمولاً از packet خام، دسترسی سطح بالاتر و بودجهٔ بزرگ FD و conntrack سود
-می‌برند. این فرض‌ها روی Android بدون روت یا در شبکهٔ موبایل برقرار نیست.
+می‌برند. این فرض‌ها روی Android بدون روت یا در شبکهٔ موبایل همیشه برقرار نیست.
 
 قنات مدل یک سرور چندده‌هسته‌ای را روی گوشی کپی نمی‌کند. موتور آن از
 `connect()` غیرمسدودکننده، `epoll` با fallback مبتنی بر `select()`، پنجرهٔ
@@ -239,11 +239,13 @@ Cloudflare finalists -> bounded epoll verifier -> TLS 1.3/1.2
 ```bash
 pkg update -y
 pkg install -y clang make git curl
-git clone https://github.com/EntropyRoot/Qanat-Scanner.git
-cd Qanat
+git clone https://github.com/EntropyRoot/Qanat-Scanner.git Qanat-Scanner
+cd Qanat-Scanner
 make NATIVE=1
-./build/qanat --version
-./build/qanat doctor
+make install
+hash -r
+qanat --version
+qanat doctor
 ```
 
 گزینهٔ `NATIVE=1` روی گوشی ARM64، فلگ `-mcpu=native` را فعال می‌کند. بیلد release همچنین از `-O3`، حذف sectionهای بدون استفاده و ThinLTO در Clang استفاده می‌کند.
@@ -255,12 +257,31 @@ make NATIVE=1
 pkg install -y openssl
 ```
 
-برای نصب فایل اجرایی در مسیر فرمان‌های Termux:
+نام مقصد صریح `Qanat-Scanner` و فرمان `cd` باید دقیقاً یکسان باشند. فقط build
+کردن، باینری قدیمی موجود در `PATH` را عوض نمی‌کند؛ `make install` مرحله‌ای است
+که فرمان نصب‌شده را به‌روزرسانی می‌کند.
+
+### به‌روزرسانی checkout موجود
+
+اگر `~/Qanat-Scanner` از قبل وجود دارد دوباره `git clone` نزنید. clone پوشهٔ
+موجود یا باینری نصب‌شده را به‌روزرسانی نمی‌کند. ابتدا وضعیت checkout را ببینید،
+فقط fast-forward بگیرید، سپس دوباره build و install کنید:
 
 ```bash
+cd "$HOME/Qanat-Scanner"
+git status --short
+git remote -v
+git pull --ff-only
+make NATIVE=1
 make install
+hash -r
 qanat --version
 ```
+
+اگر `cd` شکست خورد، remote مخزن مورد انتظار نبود، تغییر ناشناخته دیدید یا
+`git pull --ff-only` رد شد، متوقف شوید و پوشهٔ قبلی را پاک نکنید. برای تشخیص
+launcher قدیمی بدون هیچ تغییری، `type -a qanat`، سپس `qanat --version` و
+`ls -l "$PREFIX/bin/qanat"` را اجرا کنید.
 
 برای بیلد و نصب به روت نیاز نیست.
 
@@ -332,6 +353,8 @@ make NATIVE=1 LTO=
 ```
 
 منوی اصلی سه گزینه دارد: `1) تحلیل‌گر CDN`، `2) اسکنر هاست` و `3) ابزارهای LAN و شبکه`. صفحهٔ مستقل **Scan Plan / تنظیمات اسکن** در بخش CDN، بدون نیاز به CLI، حالت Auto، Full، Percentage، Fixed Budget و Reachable Target؛ روش selection؛ ظرفیت candidate؛ تعداد کل finalist شامل All؛ Output Top؛ سه concurrency مستقل؛ ranking و memory budget را ویرایش و ذخیره می‌کند. پیش از شروع، rangeهای نرمال‌شده، overlap حذف‌شده، حافظه، FD، batch و plan مؤثر نمایش داده می‌شوند. Full بسیار بزرگ تأیید صریح می‌خواهد.
+
+در ترمینال‌های موبایل با عرض ۴۸ تا ۷۱ ستون، Scan Plan به نمای تک‌پنله و scrollable تبدیل می‌شود. پس از Review نیز Resource Plan فشرده همان totalها، محدودیت‌های pipeline، concurrency، حافظه و FD نمای عریض را نشان می‌دهد. فقط وقتی فضای قابل‌استفاده کمتر از ۴۸×۱۲ باشد صفحه رد می‌شود و اندازهٔ ترمینال هرگز بزرگ‌تر از واقعیت جعل نمی‌شود.
 
 این launcher فقط زمانی فعال می‌شود که ورودی و خروجی استاندارد هر دو TTY باشند؛ script، pipe و redirect همچنان از CLI/headless استفاده می‌کنند.
 
@@ -509,7 +532,19 @@ Candidate Capacity حافظهٔ streaming برای endpointهای امیدوار
 --fingerprint random
 ```
 
-یک `qn_profile_instance` immutable مشترک، wire واقعی ClientHello، JA3/JA4 preview، تنظیمات HTTP/2، شکل HTTP/1، verifier و metadata خروجی را می‌سازد. profileهای داخلی فقط cipher، group، key share، signature algorithm، ALPN و مسیر retry پیاده‌سازی‌شده را advertise می‌کنند. `fingerprint list/show/diff` همین قرارداد را نشان می‌دهند؛ profile، seed و SNI یکسان preview و wire یکسان می‌سازند.
+نام‌های دقیق فعلی `chrome-android-151`، `firefox-android-153` و
+`safari-ios-26` هستند؛ نام‌های کوتاه و نسخه‌ای قبلی همچنان alias مانده‌اند.
+یک `qn_profile_instance` شخصیت مشترک TLS/HTTP را ثابت می‌کند و seed هر اتصال،
+GREASE، ترتیب extensionهای Chrome، padding مربوط به ECH، random و کلیدهای تازه
+می‌سازد. seed و شمارهٔ اتصال صریح، همان wire را بازتولید می‌کنند.
+
+نمونه‌های TLS و HTTP/1 مربوط به Chrome 151 و Firefox 153 با collector محدود و
+localhost از گوشی متصل گرفته شده‌اند. Safari 26 به‌دلیل نبود دستگاه iOS از سورس
+و reference ساخته شده است. اگر سرور یکی از شاخه‌های قدیمی خارج از executor
+محدود Qanat را انتخاب کند، نتیجه `unsupported` صریح است. شواهد پاک‌سازی‌شده در
+[نمونهٔ TLS اندروید](docs/evidence/android-clienthello-2026-08-12.json)،
+[نمونهٔ HTTP اندروید](docs/evidence/android-http1-2026-08-12.json) و
+[تست مستقیم Cloudflare](docs/evidence/cloudflare-tls-2026-08-12.json) هستند.
 
 ### معنی نتیجه‌ها و مرز اعتماد
 
@@ -530,11 +565,41 @@ Candidate Capacity حافظهٔ streaming برای endpointهای امیدوار
 | `flowing-after-marker` | انتقال محدود درخواستی پس از مشاهدهٔ marker کامل شد |
 | `stable-after-marker` | اتصال پس از مشاهدهٔ marker از idle hold تعیین‌شده عبور کرد |
 
-**مرز TLS:** قنات برای اندازه‌گیری مسیر، handshake را کامل و پیام `Finished` را بررسی می‌کند؛ اما زنجیرهٔ اعتماد، تطابق hostname، تاریخ و وضعیت لغو گواهی و امضاهای احراز هویت TLS را اعتبارسنجی نمی‌کند. پس موفق شدن `handshake` به‌تنهایی هویت کلادفلر را ثابت نمی‌کند. نشانه‌های پاسخ کلادفلر جداگانه و روی همان اتصال HTTPS، از جمله از پاسخ `/cdn-cgi/trace`، بررسی می‌شوند.
+**کلاینت TLS زنجیرهٔ گواهی، hostname، تاریخ‌ها، revocation یا امضای CertificateVerify را اعتبارسنجی نمی‌کند.** درست بودن `Finished`، اشتراک کلیدهای handshake را نشان می‌دهد؛ نه هویت کلادفلر و نه نبود interception را. برای مشاهدهٔ CDN، `cf-marker-observed` یا rung بالاتر مبتنی بر marker را لازم بدانید. `stable-after-marker` همچنان فقط دوام idle را اندازه می‌گیرد.
 
 verdictهای شکست فقط observation را توصیف می‌کنند، نه سانسور یا علت آن. firewall، رفتار سرور، شلوغی، CGNAT، تغییر route، packet loss و مداخلهٔ فعال می‌توانند نشانه‌های مشابه بسازند. فیلدهای مستقل `failure_origin`، `transport_result`، `tls_outcome`، `sys_errno` و `reason` evidence طبقه‌بندی را نگه می‌دارند.
 
 پیش از استفادهٔ پژوهشی یا عملیاتی از نتایج، [محدوده و محدودیت‌های TLS](docs/TLS.md) را بخوانید.
+
+### تأیید اختیاری تونل واقعی
+
+این مرحله پیش‌فرض خاموش است، چون به سرور پروکسی کاربر و اینترنت ترافیک واقعی
+می‌فرستد. در منوی شماره‌ای از مسیر `CDN Scanner -> Tunnel verification` می‌توان
+لینک مخفی یا فایل خصوصی، تعداد کاندید، concurrency، تلاش‌ها و مسیر Xray را تنظیم
+کرد. گزینهٔ نصب Xray نیز داخل همین منو است، ولی عملیات شبکه‌ای جداگانه و نیازمند
+تأیید است؛ نسخهٔ رسمی Android ARM64 و فایل `.dgst` را می‌گیرد، SHA-256 را بررسی
+می‌کند و سپس در `$PREFIX/bin` یا `$HOME/.local/bin` نصب می‌کند.
+
+برای اجرای headless بهتر است secret در process list قرار نگیرد:
+
+```sh
+chmod 600 tunnel.link
+qanat --cf --headless \
+  --tunnel-target 5 --tunnel-concurrency 2 --tunnel-attempts 2 \
+  --tunnel-link-file tunnel.link --xray auto --tunnel-confirm \
+  --json results.json
+```
+
+Qanat فقط `address` را با IP کاندید عوض می‌کند و SNI، Host، transport، path یا
+service، ALPN، fingerprint و credential اصلی حفظ می‌شوند. Xray با config موقت
+خصوصی بالا می‌آید، SOCKS5 CONNECT را کلاینت خود Qanat انجام می‌دهد و
+`GET /cdn-cgi/trace` از TLS stack خود Qanat عبور می‌کند. موفقیت فقط HTTP 2xx به
+همراه `colo=` است. نبود Xray وضعیت `binary-missing` دارد، نه موفقیت خالی و نه
+شکست کل scan.
+
+رتبه‌بندی `passed`، حالت تست‌نشده/skip و failure قطعی تونل را جدا نگه می‌دارد.
+TUI و JSON/CSV وضعیت، attempts، TTFB، throughput اختیاری و دلیل bounded را نشان
+می‌دهند؛ credential هرگز export نمی‌شود.
 
 ### استفاده از کاندیدهای تأییدشده در Xray یا sing-box
 
@@ -614,7 +679,7 @@ exporterهای `list`، `xray` و `singbox` فقط رکوردی را وارد م
 ## خروجی و تکرارپذیری
 
 - **متن headless:** ردیف‌های فشرده برای pipe و ابزارهای shell.
-- **JSON schema 6:** build fingerprint، digest و metadata snapshot رنج، scan plan مؤثر، accounting کامل، تعداد candidate/finalist/output، نسخهٔ profile و score، componentهای score، evidence تایپ‌شده و metricهای RTT را ثبت می‌کند. `verification_completed` فقط accounting terminal است، نه success. برای مشاهدهٔ تأییدشدهٔ CDN، verdict `cf-marker-observed` یا بالاتر لازم است.
+- **JSON schema 7:** همهٔ فیلدهای schema 6 به‌علاوهٔ plan و accounting مرحلهٔ tunnel، وضعیت/TTFB/throughput/reason هر رکورد و score version 3. مهاجرت از schema 6 باید وضعیت tunnel را `untested` مقداردهی کند؛ نسخه‌های آیندهٔ ناشناخته همچنان باید رد شوند.
 - **CSV:** جدول مناسب spreadsheet؛ پیشوندهای فرمول در banner خنثی می‌شوند.
 - **Template تونل:** فقط کاندید marker-confirmed، همراه با placeholder واضح برای credential و path.
 - **Event log:** مشاهده‌های کامل فینالیست شامل نسخه و cipher TLS، زمان connect/handshake/TTFB، flow، idle و مشخصات نمایشی گواهی.
@@ -651,7 +716,7 @@ exporterهای `list`، `xray` و `singbox` فقط رکوردی را وارد م
 بردار و تست تفاضلی رمزنگاری، بررسی ABI روی AArch64، fault injection برای موتور
 و verifier، تست interoperability محلی TLS 1.2/1.3 با OpenSSL، peer خصمانهٔ
 loopback، تست pseudo-terminal برای منوی عددی و ورودی تکه‌تکه، تحلیل‌گر GCC،
-ASan/UBSan، ThreadSanitizer و شش fuzz target برای parser و TLS session است.
+ASan/UBSan، ThreadSanitizer و هفت fuzz target برای parser، TLS session و لینک tunnel است.
 
 این gateها روی میزبان و بیلد NDK اجرا می‌شوند و suiteهای ARM64 نیز روی دستگاه
 واقعی بررسی شده‌اند. با این حال، عبور از تست‌ها جای audit مستقل امنیت و

@@ -6,11 +6,12 @@
 #include <stdint.h>
 
 #include "qanat/scan_plan.h"
+#include "qanat/tunnel.h"
 
 #define QN_NAME    "qanat"
 /* The only place the version is written; the Makefile reads it from here. */
 #define QN_VERSION "1.0.0"
-#define QN_EXPORT_SCHEMA 6u
+#define QN_EXPORT_SCHEMA 7u
 
 /* Names the compiler, target and flags an artifact was actually built with. */
 #ifndef QN_BUILD_FINGERPRINT
@@ -116,6 +117,7 @@ typedef struct {
     uint16_t   score_stability;
     uint16_t   score_confidence;
     uint16_t   score_throughput;
+    uint16_t   score_tunnel;
     uint8_t    highest_rung_reached;
     uint8_t    terminal_outcome;
     uint8_t    loss_pct;
@@ -136,6 +138,12 @@ typedef struct {
     uint8_t    tls_outcome;
     uint8_t    verified;
     uint8_t    rtt_ci90_valid;
+    uint8_t    tunnel_state;
+    uint8_t    tunnel_attempts;
+    uint16_t   _tunnel_pad;
+    uint32_t   tunnel_ttfb_us;
+    uint32_t   tunnel_kbps;
+    char       tunnel_reason[32];
     qn_samples samples;
 } cf_record;
 
@@ -206,6 +214,13 @@ typedef struct {
     uint32_t    idle_ms;
     uint32_t    verify_concurrency;
     uint32_t    stability_concurrency;
+    char        input_tunnel_link[QN_TUNNEL_LINK_MAX + 1u];
+    char        input_tunnel_file[1024];
+    char        input_xray_path[QN_TUNNEL_XRAY_PATH_MAX + 1u];
+    const char *tunnel_link;
+    const char *tunnel_link_file;
+    const char *xray_path;
+    bool        tunnel_confirmed;
 
     uint32_t workers;     /* 0 = auto from CPU topology */
     uint32_t concurrency; /* 0 = auto from rlimit */

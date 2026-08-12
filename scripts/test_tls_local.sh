@@ -24,7 +24,8 @@ $CC -std=c11 -D_GNU_SOURCE -I"$ROOT/include" -O1 -g -pthread \
     "$ROOT/src/net/tls13.c" "$ROOT/src/net/tls12.c" "$ROOT/src/net/profile.c" \
     "$ROOT/src/net/tls_capability.c" "$ROOT/src/net/tls_hello.c" \
     "$ROOT/src/net/tls_fp.c" "$ROOT/src/net/tls_cert.c" \
-    "$ROOT/src/crypto/"*.c "$ROOT/src/core/perm.c" "$ROOT/src/core/util.c" ${EXTRA_CFLAGS:-}
+    "$ROOT/src/crypto/"*.c "$ROOT/src/crypto/arm64/cpufeat.c" \
+    "$ROOT/src/core/perm.c" "$ROOT/src/core/util.c" ${EXTRA_CFLAGS:-}
 
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TMP/k.pem" -out "$TMP/c.pem" \
     -days 1 -subj "/CN=localhost" >/dev/null 2>&1

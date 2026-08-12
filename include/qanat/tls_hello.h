@@ -7,6 +7,13 @@
 #define QN_HELLO_MAX_EXTS    32
 #define QN_HELLO_MAX_GROUPS  16
 #define QN_HELLO_MAX_SIGALGS 24
+#define QN_HELLO_MAX_SHARES  4
+
+typedef struct {
+    uint16_t       group;
+    const uint8_t *data;
+    uint16_t       len;
+} qn_hello_key_share;
 
 typedef struct {
     const char *sni;
@@ -15,7 +22,14 @@ typedef struct {
     uint64_t    grease_seed;
     uint8_t     random[32];
     uint8_t     session_id[32];
-    uint8_t     key_share[QN_X25519_LEN];
+    const qn_hello_key_share *key_shares;
+    uint8_t                   key_shares_n;
+    uint16_t                  selected_group;
+    uint8_t                   ech_config_id;
+    uint16_t                  ech_aead;
+    uint8_t                   ech_enc[QN_X25519_LEN];
+    const uint8_t            *ech_payload;
+    uint16_t                  ech_payload_len;
     const uint8_t *cookie;
     uint16_t       cookie_len;
 } qn_hello_req;

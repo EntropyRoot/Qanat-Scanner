@@ -99,13 +99,14 @@ uint8_t qn_samples_loss_pct(const qn_samples *s)
 uint32_t qn_cf_score_policy(cf_record *r, qn_rank_policy policy)
 {
     uint32_t edge = 0u, latency = 0u, stability = 0u, confidence, throughput;
+    uint32_t tunnel = 0u;
     uint32_t median_quality, p90_quality, jitter_quality, loss_quality;
 
     if (!r)
         return 0u;
     r->score_version = QN_SCORE_VERSION;
     r->score_edge = r->score_latency = r->score_stability = 0u;
-    r->score_confidence = r->score_throughput = 0u;
+    r->score_confidence = r->score_throughput = r->score_tunnel = 0u;
     if (r->terminal_outcome != QN_TERM_SUCCESS)
         return 0u;
     switch ((qn_highest_rung)r->highest_rung_reached) {
@@ -135,21 +136,28 @@ uint32_t qn_cf_score_policy(cf_record *r, qn_rank_policy policy)
         stability += 50u;
     confidence = r->confidence > 1000u ? 1000u : r->confidence;
     throughput = r->kbps >= 100000u ? 1000u : r->kbps / 100u;
+    if (r->tunnel_state == QN_TUNNEL_PASSED)
+        tunnel = 30000u;
+    else if (qn_tunnel_state_failed((qn_tunnel_state)r->tunnel_state))
+        tunnel = 0u;
+    else
+        tunnel = 15000u;
     r->score_edge = (uint16_t)edge;
     r->score_latency = (uint16_t)latency;
     r->score_stability = (uint16_t)stability;
     r->score_confidence = (uint16_t)confidence;
     r->score_throughput = (uint16_t)throughput;
+    r->score_tunnel = (uint16_t)tunnel;
     switch (policy) {
     case QN_RANK_LATENCY:
-        return edge + latency * 2u + stability / 2u + confidence / 2u;
+        return tunnel + edge + latency * 2u + stability / 2u + confidence / 2u;
     case QN_RANK_STABILITY:
-        return edge + stability * 2u + latency / 2u + confidence;
+        return tunnel + edge + stability * 2u + latency / 2u + confidence;
     case QN_RANK_THROUGHPUT:
-        return edge + throughput * 3u + latency / 2u + stability / 2u;
+        return tunnel + edge + throughput * 3u + latency / 2u + stability / 2u;
     case QN_RANK_BALANCED:
     default:
-        return edge + latency + stability + confidence + throughput;
+        return tunnel + edge + latency + stability + confidence + throughput;
     }
 }
 

@@ -382,13 +382,30 @@ def main() -> int:
                     b"\x1b[200~65536\x1b[201~\r",
                 ],
             ),
-            (b"65536", (10, 60)),
-            (b"Terminal is", (24, 100)),
+            (b"65536", (31, 66)),
             (b"Candidate Capacity", b"\x1b[B\x1b[200~1024\x1b[201~\r"),
-            (b"1024", b"q"),
+            (b"1024", (10, 47)),
+            (b"Terminal is", (31, 66)),
+            (b"Finalist Count", b"q"),
             (b"\x1b[?1049l", None),
         ],
         {0},
+        ("--cf",),
+    )
+    run_case(
+        "CF compact Resource Plan cancels before probing",
+        binary,
+        [
+            (b"\x1b[?1049h", (31, 66)),
+            (b"Candidate Capacity", b"\x1b[F\r"),
+            (b"Resource Plan - Confirm", None),
+            (b"planned / unique", None),
+            (b"candidate / finalist / output", None),
+            (b"memory total / budget", None),
+            (b"file descriptors", b"\x1bq"),
+            (b"\x1b[?1049l", None),
+        ],
+        {130},
         ("--cf",),
     )
 

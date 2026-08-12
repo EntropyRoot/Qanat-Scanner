@@ -5,8 +5,8 @@
 #include "qanat/tls_hello.h"
 #include "qanat/qanat.h"
 
-/* One bounded buffer is reused for request and response heads. */
-#define QN_PROBE_BUF  768
+/* Holds a modern hybrid ClientHello, then reuses the space for the response. */
+#define QN_PROBE_BUF  2304
 #define QN_EVENT_BODY 48
 
 typedef enum {

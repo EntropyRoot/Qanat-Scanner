@@ -1,7 +1,9 @@
 #include "qanat/tls_hello.h"
 #include "qanat/probe.h"
 #include "qanat/http2.h"
+#include "qanat/mlkem.h"
 #include "qanat/profile.h"
+#include "qanat/tls_capability.h"
 #include "tls_int.h"
 
 #include <stdio.h>
@@ -18,6 +20,34 @@ static int failures;
         }                                                                            \
     } while (0)
 
+static void fill_hello_material(qn_hello_req *req)
+{
+    static uint8_t hybrid[QN_HYBRID_CLIENT_SHARE_LEN];
+    static uint8_t x25519[QN_X25519_LEN];
+    static uint8_t p256[QN_P256_PUBLIC_LEN];
+    static uint8_t ech_payload[QN_ECH_PAYLOAD_MAX];
+    static const qn_hello_key_share shares[] = {
+        { QN_GROUP_X25519_MLKEM768, hybrid, sizeof hybrid },
+        { QN_GROUP_X25519, x25519, sizeof x25519 },
+        { QN_GROUP_P256, p256, sizeof p256 }
+    };
+
+    memset(hybrid, 0x42, sizeof hybrid);
+    memset(x25519, 0x42, sizeof x25519);
+    memset(p256, 0x42, sizeof p256);
+    p256[0] = 0x04u;
+    memset(req->ech_enc, 0x24, sizeof req->ech_enc);
+    memset(ech_payload, 0x81, sizeof ech_payload);
+    req->key_shares = shares;
+    req->key_shares_n = (uint8_t)QN_ARRAY_LEN(shares);
+    req->ech_aead = req->fp == QN_TLS_FP_FIREFOX ? 0x0003u : 0x0001u;
+    req->ech_config_id = 0x42u;
+    req->ech_payload = ech_payload;
+    req->ech_payload_len = req->fp == QN_TLS_FP_FIREFOX
+                               ? (uint16_t)(sizeof ech_payload - 1u)
+                               : (uint16_t)sizeof ech_payload;
+}
+
 static int build(qn_tls_fp fp, const char *sni, qn_hello_info *info, uint8_t *buf, size_t cap)
 {
     qn_hello_req req;
@@ -28,7 +58,7 @@ static int build(qn_tls_fp fp, const char *sni, qn_hello_info *info, uint8_t *bu
     req.grease_seed = 0x0123456789ABCDEFull;
     memset(req.random, 0xA5, sizeof req.random);
     memset(req.session_id, 0x5A, sizeof req.session_id);
-    memset(req.key_share, 0x42, sizeof req.key_share);
+    fill_hello_material(&req);
 
     return qn_tls_hello_build(&req, buf, cap, info);
 }
@@ -36,6 +66,114 @@ static int build(qn_tls_fp fp, const char *sni, qn_hello_info *info, uint8_t *bu
 static uint16_t get16(const uint8_t *p)
 {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+static uint8_t hex_nibble(char value)
+{
+    if (value >= '0' && value <= '9')
+        return (uint8_t)(value - '0');
+    if (value >= 'a' && value <= 'f')
+        return (uint8_t)(value - 'a' + 10);
+    return 0xffu;
+}
+
+static bool hex_decode(const char *hex, uint8_t *out, size_t out_len)
+{
+    size_t i;
+
+    if (!hex || strlen(hex) != out_len * 2u)
+        return false;
+    for (i = 0u; i < out_len; i++) {
+        uint8_t high = hex_nibble(hex[i * 2u]);
+        uint8_t low = hex_nibble(hex[i * 2u + 1u]);
+
+        if (high == 0xffu || low == 0xffu)
+            return false;
+        out[i] = (uint8_t)((high << 4) | low);
+    }
+    return true;
+}
+
+static bool sha256_matches(const void *data, size_t len, const char *expected_hex)
+{
+    uint8_t actual[QN_SHA256_LEN], expected[QN_SHA256_LEN];
+    qn_sha256 hash;
+
+    if (!hex_decode(expected_hex, expected, sizeof expected))
+        return false;
+    qn_sha256_init(&hash);
+    qn_sha256_update(&hash, data, len);
+    qn_sha256_final(&hash, actual);
+    return !memcmp(actual, expected, sizeof actual);
+}
+
+static void test_mlkem768_kat(void)
+{
+    static const char *d_hex =
+        "934d60b35624d740b30a7f227af2ae7c678e4e04e13c5f509eade2b79aea77e2";
+    static const char *z_hex =
+        "3e2a2ea6c9c476fc4937b013c993a793d6c0ab9960695ba838f649da539ca3d0";
+    static const char *shared_hex =
+        "0b1b32be26247cbcbe0916f8b0b729699c32a96d51efa4a4cd5b289239c8207e";
+    uint8_t seed[QN_MLKEM_KEYGEN_SEED_LEN];
+    uint8_t public_key[QN_MLKEM768_PUBLIC_LEN];
+    uint8_t secret_key[QN_MLKEM768_SECRET_LEN];
+    uint8_t ciphertext[QN_MLKEM768_CIPHERTEXT_LEN];
+    uint8_t shared[QN_MLKEM_SHARED_LEN], decapped[QN_MLKEM_SHARED_LEN];
+    uint8_t rejected[QN_MLKEM_SHARED_LEN], expected_shared[QN_MLKEM_SHARED_LEN];
+
+    CHECK(hex_decode(d_hex, seed, 32u));
+    CHECK(hex_decode(z_hex, seed + 32u, 32u));
+    CHECK(hex_decode(shared_hex, expected_shared, sizeof expected_shared));
+    CHECK(qn_mlkem768_keypair(public_key, secret_key, seed));
+    CHECK(qn_mlkem768_public_valid(public_key));
+    CHECK(qn_mlkem768_secret_valid(secret_key));
+    CHECK(sha256_matches(public_key, sizeof public_key,
+                         "c45a699a9efcb1a799578ce95f24b063b0b9ddc0879afdb3967fd9e1e3e8c247"));
+    CHECK(sha256_matches(secret_key, sizeof secret_key,
+                         "1dc4ab0188bfd90b41bbd91884e40a41ccd0f46e5d3754b615373c9656f6af39"));
+    CHECK(qn_mlkem768_encap(ciphertext, shared, public_key, seed));
+    CHECK(sha256_matches(ciphertext, sizeof ciphertext,
+                         "0b99b2af81971943e4ef6e6f17f42be4f3caa9fea18da0f63df1d43639a74743"));
+    CHECK(sha256_matches(shared, sizeof shared,
+                         "340f07be0ffe3d996f44bb05f10eecaca6f494c77a3c353cb1872cacb834f596"));
+    CHECK(!memcmp(shared, expected_shared, sizeof shared));
+    CHECK(qn_mlkem768_decap(decapped, ciphertext, secret_key));
+    CHECK(!memcmp(shared, decapped, sizeof shared));
+    ciphertext[0] ^= 1u;
+    CHECK(qn_mlkem768_decap(rejected, ciphertext, secret_key));
+    CHECK(memcmp(shared, rejected, sizeof shared) != 0);
+}
+
+static void test_p256_kat(void)
+{
+    static const char *generator_hex =
+        "04"
+        "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+        "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+    uint8_t secret[QN_P256_SECRET_LEN] = { 0 };
+    uint8_t generator[QN_P256_PUBLIC_LEN], shared[QN_P256_SECRET_LEN];
+    uint8_t expected[QN_P256_SECRET_LEN];
+    uint8_t sk_a[QN_P256_SECRET_LEN], sk_b[QN_P256_SECRET_LEN];
+    uint8_t pk_a[QN_P256_PUBLIC_LEN], pk_b[QN_P256_PUBLIC_LEN];
+    uint8_t ab[QN_P256_SECRET_LEN], ba[QN_P256_SECRET_LEN];
+    qn_rng rng_a, rng_b;
+
+    secret[sizeof secret - 1u] = 2u;
+    CHECK(hex_decode(generator_hex, generator, sizeof generator));
+    CHECK(hex_decode("7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
+                     expected, sizeof expected));
+    CHECK(qn_p256(shared, secret, generator));
+    CHECK(!memcmp(shared, expected, sizeof shared));
+    generator[0] = 0x02u;
+    CHECK(!qn_p256(shared, secret, generator));
+    qn_rng_seed(&rng_a, UINT64_C(0x503235362D4B4154));
+    qn_rng_seed(&rng_b, UINT64_C(0x503235362D504545));
+    CHECK(qn_p256_keypair(sk_a, pk_a, &rng_a));
+    CHECK(qn_p256_keypair(sk_b, pk_b, &rng_b));
+    CHECK(qn_p256(ab, sk_a, pk_b));
+    CHECK(qn_p256(ba, sk_b, pk_a));
+    CHECK(!memcmp(ab, ba, sizeof ab));
 }
 
 static bool unique_extensions(const uint8_t *hello, size_t n)
@@ -79,6 +217,76 @@ static bool unique_extensions(const uint8_t *hello, size_t n)
     return p == end;
 }
 
+static bool find_extension(uint8_t *hello, size_t n, uint16_t wanted,
+                           uint8_t **data, uint16_t *data_len)
+{
+    size_t p = 9u, end;
+
+    if (!hello || n < 45u)
+        return false;
+    p += 2u + 32u;
+    if (p >= n || (size_t)hello[p] > n - p - 1u)
+        return false;
+    p += 1u + hello[p];
+    if (n - p < 2u || (size_t)get16(hello + p) > n - p - 2u)
+        return false;
+    p += 2u + get16(hello + p);
+    if (p >= n || (size_t)hello[p] > n - p - 1u)
+        return false;
+    p += 1u + hello[p];
+    if (n - p < 2u || (size_t)get16(hello + p) > n - p - 2u)
+        return false;
+    end = p + 2u + get16(hello + p);
+    p += 2u;
+    while (p < end) {
+        uint16_t type, len;
+
+        if (end - p < 4u)
+            return false;
+        type = get16(hello + p);
+        len = get16(hello + p + 2u);
+        p += 4u;
+        if ((size_t)len > end - p)
+            return false;
+        if (type == wanted) {
+            *data = hello + p;
+            *data_len = len;
+            return true;
+        }
+        p += len;
+    }
+    return false;
+}
+
+static void reject_extension_mutation(qn_tls_fp fp, uint16_t type,
+                                      size_t offset, uint8_t value)
+{
+    uint8_t hello[4096], *data;
+    uint16_t data_len;
+    qn_hello_info info;
+    int n = build(fp, "example.com", &info, hello, sizeof hello);
+
+    CHECK(n > 0);
+    CHECK(n > 0 && find_extension(hello, (size_t)n, type, &data, &data_len));
+    if (n <= 0 || !find_extension(hello, (size_t)n, type, &data, &data_len) ||
+        offset >= data_len)
+        return;
+    data[offset] = value;
+    CHECK(!qn_tls_hello_inspect(hello, (size_t)n, &info));
+}
+
+static void test_extension_body_validation(void)
+{
+    reject_extension_mutation(QN_TLS_FP_CHROME, 0x0005u, 0u, 2u);
+    reject_extension_mutation(QN_TLS_FP_CHROME, 0xFF01u, 0u, 1u);
+    reject_extension_mutation(QN_TLS_FP_CHROME, 0x002Du, 1u, 0u);
+    reject_extension_mutation(QN_TLS_FP_CHROME, 0x001Bu, 0u, 1u);
+    reject_extension_mutation(QN_TLS_FP_CHROME, 0x44CDu, 4u, '3');
+    reject_extension_mutation(QN_TLS_FP_CHROME, 0xFE0Du, 41u, 0u);
+    reject_extension_mutation(QN_TLS_FP_FIREFOX, 0x001Cu, 0u, 0u);
+    reject_extension_mutation(QN_TLS_FP_FIREFOX, 0x0022u, 1u, 0u);
+}
+
 static void test_no_duplicate_extensions(void)
 {
     uint8_t       hello[4096];
@@ -96,7 +304,7 @@ static void test_no_duplicate_extensions(void)
         req.grease_seed = seed;
         memset(req.random, (int)(seed & 0xFFu), sizeof req.random);
         memset(req.session_id, (int)((seed >> 8) & 0xFFu), sizeof req.session_id);
-        memset(req.key_share, 0x42, sizeof req.key_share);
+        fill_hello_material(&req);
         n = qn_tls_hello_build(&req, hello, sizeof hello, &info);
         CHECK(n > 0 && unique_extensions(hello, (size_t)n));
 
@@ -167,16 +375,21 @@ static void test_hello_wire_contract(void)
             req.grease_seed = (uint64_t)seed;
             memset(req.random, (int)seed, sizeof req.random);
             memset(req.session_id, (int)(seed ^ 0x5Au), sizeof req.session_id);
-            memset(req.key_share, 0x42, sizeof req.key_share);
+            fill_hello_material(&req);
             n = qn_tls_hello_build(&req, hello, sizeof hello, &built);
             CHECK(n > 0);
             CHECK(n > 0 && qn_tls_hello_inspect(hello, (size_t)n, &parsed));
             CHECK(n > 0 && same_facts(&built, &parsed));
             CHECK(qn_tls_hello_capability_check(&parsed, true, error, sizeof error));
-            CHECK(parsed.nciphers == 9u);
-            CHECK(parsed.ngroups == 1u && parsed.groups[0] == 0x001Du);
-            CHECK(parsed.nkeyshares == 1u && parsed.keyshares[0] == 0x001Du);
-            CHECK(parsed.keyshare_lens[0] == QN_X25519_LEN);
+            CHECK(parsed.nciphers >= 15u);
+            CHECK(parsed.ngroups >= 4u &&
+                  parsed.groups[0] == QN_GROUP_X25519_MLKEM768 &&
+                  parsed.groups[1] == QN_GROUP_X25519);
+            CHECK(parsed.nkeyshares >= 2u &&
+                  parsed.keyshares[0] == QN_GROUP_X25519_MLKEM768 &&
+                  parsed.keyshare_lens[0] == QN_HYBRID_CLIENT_SHARE_LEN &&
+                  parsed.keyshares[1] == QN_GROUP_X25519 &&
+                  parsed.keyshare_lens[1] == QN_X25519_LEN);
             CHECK(parsed.nversions == 2u && parsed.versions[0] == 0x0304u &&
                   parsed.versions[1] == 0x0303u);
 
@@ -202,21 +415,25 @@ static void test_hello_wire_contract(void)
         }
         CHECK(qn_tls_hello_inspect(hello, (size_t)n, &info));
 
-        info.ciphers[0] = 0x00FFu;
+        for (cut = 0u; cut < info.nciphers; cut++)
+            info.ciphers[cut] = (uint16_t)(0xA000u + cut);
         CHECK(!qn_tls_hello_capability_check(&info, false, error, sizeof error));
-        CHECK(strstr(error, "cipher suite") != NULL);
+        CHECK(strstr(error, "usable cipher suite") != NULL);
         CHECK(qn_tls_hello_inspect(hello, (size_t)n, &info));
-        info.groups[0] = 0x0017u;
+        for (cut = 0u; cut < info.ngroups; cut++)
+            info.groups[cut] = (uint16_t)(0x1800u + cut);
         CHECK(!qn_tls_hello_capability_check(&info, false, error, sizeof error));
-        CHECK(strstr(error, "group") != NULL);
+        CHECK(strstr(error, "usable group") != NULL);
         CHECK(qn_tls_hello_inspect(hello, (size_t)n, &info));
-        info.keyshares[0] = 0x0017u;
+        for (cut = 0u; cut < info.nkeyshares; cut++)
+            info.keyshares[cut] = 0x0018u;
         CHECK(!qn_tls_hello_capability_check(&info, false, error, sizeof error));
-        CHECK(strstr(error, "key share") != NULL);
+        CHECK(strstr(error, "usable key share") != NULL);
         CHECK(qn_tls_hello_inspect(hello, (size_t)n, &info));
-        info.sigalgs[0] = 0x0807u;
+        for (cut = 0u; cut < info.nsigalgs; cut++)
+            info.sigalgs[cut] = (uint16_t)(0xA100u + cut);
         CHECK(!qn_tls_hello_capability_check(&info, false, error, sizeof error));
-        CHECK(strstr(error, "signature scheme") != NULL);
+        CHECK(strstr(error, "usable signature scheme") != NULL);
         CHECK(qn_tls_hello_inspect(hello, (size_t)n, &info));
         info.versions[0] = 0x0305u;
         CHECK(!qn_tls_hello_capability_check(&info, false, error, sizeof error));
@@ -284,6 +501,98 @@ static bool bytes_differ(const uint8_t *left, size_t left_n,
                          const uint8_t *right, size_t right_n)
 {
     return left_n != right_n || memcmp(left, right, left_n) != 0;
+}
+
+static bool tokens_in_order(const char *text, const char *const *tokens, size_t count)
+{
+    const char *cursor = text;
+    size_t i;
+
+    for (i = 0u; i < count; i++) {
+        cursor = strstr(cursor, tokens[i]);
+        if (!cursor)
+            return false;
+        cursor += strlen(tokens[i]);
+    }
+    return true;
+}
+
+static void test_android_http1_profiles(void)
+{
+    static const char *const chrome_order[] = {
+        "Host: localhost\r\n", "Connection: keep-alive\r\n", "Sec-CH-UA: ",
+        "Sec-CH-UA-Mobile: ?1\r\n", "Sec-CH-UA-Platform: \"Android\"\r\n",
+        "Upgrade-Insecure-Requests: 1\r\n", "User-Agent: ", "Accept: ",
+        "Sec-Fetch-Site: cross-site\r\n", "Sec-Fetch-Mode: navigate\r\n",
+        "Sec-Fetch-Dest: document\r\n", "Accept-Encoding: gzip, deflate, br, zstd\r\n",
+        "Accept-Language: fa,en-US;q=0.9,en;q=0.8,de;q=0.7\r\n"
+    };
+    static const char *const firefox_order[] = {
+        "Host: localhost\r\n", "User-Agent: ", "Accept: ",
+        "Accept-Language: fa-IR\r\n", "Accept-Encoding: gzip, deflate, br, zstd\r\n",
+        "Connection: keep-alive\r\n", "Upgrade-Insecure-Requests: 1\r\n",
+        "Sec-Fetch-Dest: document\r\n", "Sec-Fetch-Mode: navigate\r\n",
+        "Sec-Fetch-Site: none\r\n", "Sec-Fetch-User: ?1\r\n",
+        "Priority: u=0, i\r\n"
+    };
+    uint8_t request[2048];
+    int n;
+
+    n = qn_profile_http1_get(qn_client_profile_get(QN_TLS_FP_CHROME), 0u,
+                             "localhost", "/qanat-profile", request, sizeof request);
+    CHECK(n > 0);
+    CHECK(n > 0 && tokens_in_order((const char *)request, chrome_order,
+                                   QN_ARRAY_LEN(chrome_order)));
+    CHECK(n > 0 && strstr((const char *)request, "Chrome/151.0.0.0") != NULL);
+    CHECK(n > 0 && strstr((const char *)request, "identity") == NULL);
+    CHECK(n > 3 && !memcmp(request + n - 4, "\r\n\r\n", 4u));
+
+    n = qn_profile_http1_get(qn_client_profile_get(QN_TLS_FP_FIREFOX), 0u,
+                             "localhost", "/qanat-profile", request, sizeof request);
+    CHECK(n > 0);
+    CHECK(n > 0 && tokens_in_order((const char *)request, firefox_order,
+                                   QN_ARRAY_LEN(firefox_order)));
+    CHECK(n > 0 && strstr((const char *)request, "Firefox/153.0") != NULL);
+    CHECK(n > 0 && strstr((const char *)request, "identity") == NULL);
+    CHECK(n > 3 && !memcmp(request + n - 4, "\r\n\r\n", 4u));
+}
+
+static void test_http2_profile_settings(void)
+{
+    static const qn_h2_setting chrome[] = {
+        { 1u, 65536u }, { 2u, 0u }, { 4u, 6u << 20 }, { 6u, 256u << 10 }
+    };
+    static const qn_h2_setting firefox[] = {
+        { 1u, 65536u }, { 2u, 0u }, { 4u, 131072u }, { 5u, 16384u }
+    };
+    static const qn_h2_setting safari[] = {
+        { 1u, 4096u }, { 2u, 0u }, { 3u, 100u }, { 4u, 2u << 20 },
+        { 8u, 1u }, { 9u, 1u }
+    };
+    static const struct {
+        qn_tls_fp profile;
+        const qn_h2_setting *settings;
+        size_t count;
+        uint32_t window;
+    } cases[] = {
+        { QN_TLS_FP_CHROME, chrome, QN_ARRAY_LEN(chrome), 15u << 20 },
+        { QN_TLS_FP_FIREFOX, firefox, QN_ARRAY_LEN(firefox), 12u << 20 },
+        { QN_TLS_FP_SAFARI, safari, QN_ARRAY_LEN(safari), 10u << 20 }
+    };
+    size_t i;
+
+    for (i = 0u; i < QN_ARRAY_LEN(cases); i++) {
+        qn_h2_setting actual[QN_PROFILE_MAX_H2_SETTINGS];
+        size_t count = 0u;
+        uint32_t window = 0u;
+
+        CHECK(qn_profile_h2_shape(qn_client_profile_get(cases[i].profile), 0u,
+                                  actual, QN_ARRAY_LEN(actual), &count, &window));
+        CHECK(count == cases[i].count);
+        CHECK(count == cases[i].count &&
+              !memcmp(actual, cases[i].settings, count * sizeof actual[0]));
+        CHECK(window == cases[i].window);
+    }
 }
 
 static void test_profile_instance_wire_identity(void)
@@ -373,6 +682,33 @@ static void test_profile_instance_wire_identity(void)
     }
 }
 
+static void test_profile_connection_variation(void)
+{
+    qn_profile_instance profile;
+    qn_rng stream, repeat;
+    qn_hello_info first_info, next_info;
+    uint8_t first[4096], copy[4096], next[4096];
+    int first_n, copy_n, next_n;
+    bool shape_changed = false;
+
+    CHECK(qn_profile_instance_init(&profile, QN_TLS_FP_CHROME, 151u,
+                                   "localhost", true, false));
+    qn_rng_seed(&stream, 0x151u);
+    qn_rng_seed(&repeat, 0x151u);
+    first_n = qn_tls_build_hello_instance(first, sizeof first, &profile, &stream);
+    copy_n = qn_tls_build_hello_instance(copy, sizeof copy, &profile, &repeat);
+    CHECK(first_n > 0 && copy_n == first_n && !memcmp(first, copy, (size_t)first_n));
+    CHECK(first_n > 0 && qn_tls_hello_inspect(first, (size_t)first_n, &first_info));
+
+    for (unsigned i = 0u; i < 4u; i++) {
+        next_n = qn_tls_build_hello_instance(next, sizeof next, &profile, &stream);
+        CHECK(next_n > 0 && qn_tls_hello_inspect(next, (size_t)next_n, &next_info));
+        if (next_n > 0 && !same_facts(&first_info, &next_info))
+            shape_changed = true;
+    }
+    CHECK(shape_changed);
+}
+
 static void test_hello_shape(void)
 {
     uint8_t       buf[4096];
@@ -380,7 +716,7 @@ static void test_hello_shape(void)
     int           n;
 
     n = build(QN_TLS_FP_CHROME, "example.com", &info, buf, sizeof buf);
-    CHECK(n == 512);
+    CHECK(n > 1500);
     CHECK(buf[0] == 0x16);
     CHECK(buf[1] == 0x03 && buf[2] == 0x01);
     CHECK(((size_t)buf[3] << 8 | buf[4]) == (size_t)n - 5u);
@@ -424,7 +760,10 @@ static void test_fp_parse(void)
     CHECK(qn_tls_fp_parse("chrome-android-126", &fp) && fp == QN_TLS_FP_CHROME);
     CHECK(qn_tls_fp_parse("firefox-android-127", &fp) && fp == QN_TLS_FP_FIREFOX);
     CHECK(qn_tls_fp_parse("safari-ios-17", &fp) && fp == QN_TLS_FP_SAFARI);
-    CHECK(strcmp(qn_tls_fp_str(QN_TLS_FP_CHROME), "chrome-android-126") == 0);
+    CHECK(qn_tls_fp_parse("chrome-android-151", &fp) && fp == QN_TLS_FP_CHROME);
+    CHECK(qn_tls_fp_parse("firefox-android-153", &fp) && fp == QN_TLS_FP_FIREFOX);
+    CHECK(qn_tls_fp_parse("safari-ios-26", &fp) && fp == QN_TLS_FP_SAFARI);
+    CHECK(strcmp(qn_tls_fp_str(QN_TLS_FP_CHROME), "chrome-android-151") == 0);
     CHECK(!qn_tls_fp_parse("edge", &fp));
     CHECK(!qn_tls_fp_parse(NULL, &fp));
     CHECK(!qn_tls_fp_parse("chrome", NULL));
@@ -443,7 +782,7 @@ static void test_random_requires_instance(void)
     req.grease_seed = 1u;
     memset(req.random, 0xA5, sizeof req.random);
     memset(req.session_id, 0x5A, sizeof req.session_id);
-    memset(req.key_share, 0x42, sizeof req.key_share);
+    fill_hello_material(&req);
 
     req.fp = QN_TLS_FP_RANDOM;
     CHECK(qn_tls_hello_build(&req, hello, sizeof hello, &info) < 0);
@@ -533,6 +872,60 @@ static size_t server_hello(const qn_tls_session *s, uint8_t *wire, enum sh_case 
 
     put24(wire + 6u, (uint32_t)(p - 9u));
     put16(wire + 3u, (uint16_t)(p - 5u));
+    return p;
+}
+
+static size_t hybrid_server_hello(const qn_tls_session *s, uint8_t *wire)
+{
+    uint8_t server_sk[QN_X25519_LEN] = { 7u };
+    uint8_t server_pk[QN_X25519_LEN];
+    uint8_t seed[QN_MLKEM_ENCAP_SEED_LEN] = { 0x51u, 0x4Eu };
+    uint8_t shared[QN_MLKEM_SHARED_LEN] = { 0u };
+    size_t p = 9u, extlen_at, ext_start;
+
+    qn_x25519_base(server_pk, server_sk);
+
+    wire[0] = RT_HS;
+    wire[1] = 3u;
+    wire[2] = 3u;
+    wire[5] = HS_SERVER_HELLO;
+    put16(wire + p, 0x0303u);
+    p += 2u;
+    memset(wire + p, 0xA6, 32u);
+    p += 32u;
+    wire[p++] = s->session_id_len;
+    memcpy(wire + p, s->session_id, s->session_id_len);
+    p += s->session_id_len;
+    put16(wire + p, 0x1303u);
+    p += 2u;
+    wire[p++] = 0u;
+    extlen_at = p;
+    p += 2u;
+    ext_start = p;
+
+    put16(wire + p, 0x002Bu);
+    put16(wire + p + 2u, 2u);
+    put16(wire + p + 4u, 0x0304u);
+    p += 6u;
+
+    put16(wire + p, 0x0033u);
+    put16(wire + p + 2u, QN_HYBRID_SERVER_SHARE_LEN + 4u);
+    put16(wire + p + 4u, QN_GROUP_X25519_MLKEM768);
+    put16(wire + p + 6u, QN_HYBRID_SERVER_SHARE_LEN);
+    if (!qn_mlkem768_encap(wire + p + 8u, shared, s->hybrid_share, seed)) {
+        qn_wipe(shared, sizeof shared);
+        qn_wipe(server_sk, sizeof server_sk);
+        return 0u;
+    }
+    memcpy(wire + p + 8u + QN_MLKEM768_CIPHERTEXT_LEN,
+           server_pk, sizeof server_pk);
+    p += 8u + QN_HYBRID_SERVER_SHARE_LEN;
+
+    put16(wire + extlen_at, (uint16_t)(p - ext_start));
+    put24(wire + 6u, (uint32_t)(p - 9u));
+    put16(wire + 3u, (uint16_t)(p - 5u));
+    qn_wipe(shared, sizeof shared);
+    qn_wipe(server_sk, sizeof server_sk);
     return p;
 }
 
@@ -642,7 +1035,7 @@ static qn_tls_rc feed_once(qn_tls_session *session, const uint8_t *wire, size_t 
 
 static void test_hrr_capability_path(void)
 {
-    uint8_t hello[1024], wire[512], out[1024], final_wire[512];
+    uint8_t hello[4096], wire[512], out[4096], final_wire[512];
     size_t split;
 
     {
@@ -698,7 +1091,6 @@ static void test_hrr_capability_path(void)
         } cases[] = {
             { HRR_NO_COOKIE, QN_TLS_RC_PROTO },
             { HRR_X25519_REQUEST, QN_TLS_RC_PROTO },
-            { HRR_ALTERNATE_GROUP, QN_TLS_RC_UNSUPPORTED },
             { HRR_BAD_COOKIE_LENGTH, QN_TLS_RC_PROTO },
             { HRR_UNKNOWN_EXTENSION, QN_TLS_RC_PROTO }
         };
@@ -724,6 +1116,20 @@ static void test_hrr_capability_path(void)
         size_t n, out_n = 0u;
 
         CHECK(start_test_session(&session, &rng, hello, sizeof hello));
+        n = hello_retry_request(&session, wire, HRR_ALTERNATE_GROUP);
+        CHECK(feed_once(&session, wire, n, out, sizeof out, &out_n) ==
+              QN_TLS_RC_MORE);
+        CHECK(out_n > 0u && session.hrr_done &&
+              session.hrr_group == QN_GROUP_P256);
+        qn_tls_free(&session);
+    }
+
+    {
+        qn_tls_session session;
+        qn_rng rng;
+        size_t n, out_n = 0u;
+
+        CHECK(start_test_session(&session, &rng, hello, sizeof hello));
         n = hello_retry_request(&session, wire, HRR_VALID);
         CHECK(feed_once(&session, wire, n, out, 64u, &out_n) == QN_TLS_RC_SPACE);
         CHECK(out_n == 0u && !session.hrr_done);
@@ -733,7 +1139,7 @@ static void test_hrr_capability_path(void)
 
 static qn_tls_rc feed_server_hello(enum sh_case which, uint8_t *state)
 {
-    uint8_t         hello[1024], wire[512], out[512], app[32];
+    uint8_t         hello[4096], wire[512], out[512], app[32];
     qn_rng          rng;
     qn_tls_config   cfg;
     qn_tls_session  s;
@@ -776,9 +1182,25 @@ static void test_server_hello_validation(void)
     CHECK(feed_server_hello(SH_ALPN_WRONG_FLIGHT, &st) == QN_TLS_RC_PROTO);
 }
 
+static void test_hybrid_server_hello(void)
+{
+    uint8_t hello[4096], wire[1400], out[64];
+    qn_tls_session session;
+    qn_rng rng;
+    size_t n, out_n = 0u;
+
+    CHECK(start_test_session(&session, &rng, hello, sizeof hello));
+    n = hybrid_server_hello(&session, wire);
+    CHECK(n > QN_HYBRID_SERVER_SHARE_LEN);
+    CHECK(feed_once(&session, wire, n, out, sizeof out, &out_n) == QN_TLS_RC_MORE);
+    CHECK(out_n == 0u && session.st == QN_TLS_ST_WAIT_EE);
+    CHECK(session.peer_group == QN_GROUP_X25519_MLKEM768);
+    qn_tls_free(&session);
+}
+
 static void test_server_hello_split_points(void)
 {
-    uint8_t hello[1024], wire[512], out[512];
+    uint8_t hello[4096], wire[512], out[512];
     qn_tls_session template_session;
     qn_rng template_rng;
     size_t n, split;
@@ -881,6 +1303,122 @@ static void stage_hs(qn_tls_session *s, uint32_t type, const uint8_t *body, size
     s->hs_kept = (uint32_t)n;
     if (n)
         memcpy(s->hs, body, n);
+}
+
+static qn_tls_rc send_compress_certificate_ee(qn_tls_fp fp, uint16_t algorithm,
+                                              qn_tls_session *s)
+{
+    uint8_t ee[] = { 0u, 6u, 0u, 0x1Bu, 0u, 2u,
+                     (uint8_t)(algorithm >> 8), (uint8_t)algorithm };
+
+    memset(s, 0, sizeof *s);
+    s->cfg.fp = fp;
+    s->st = QN_TLS_ST_WAIT_EE;
+    stage_hs(s, HS_ENCRYPTED_EXT, ee, sizeof ee);
+    return qn_tls13_dispatch(s, NULL);
+}
+
+static qn_tls_rc select_alps(qn_tls_fp fp, bool alps_first, bool bad_ack,
+                             qn_tls_session *s)
+{
+    static const uint8_t alpn[] = { 0u, 3u, 2u, 'h', '2' };
+    uint8_t settings[] = {
+        0u, 0u, 6u, 4u, 0u, 0u, 0u, 0u, 0u,
+        0u, 4u, 0u, 2u, 0u, 0u
+    };
+    uint8_t ee[2u + 4u + sizeof alpn + 4u + sizeof settings];
+    size_t p = 2u;
+
+    settings[4] = bad_ack ? 1u : 0u;
+    for (unsigned pass = 0u; pass < 2u; pass++) {
+        bool emit_alps = alps_first ? pass == 0u : pass == 1u;
+        const uint8_t *body = emit_alps ? settings : alpn;
+        size_t body_len = emit_alps ? sizeof settings : sizeof alpn;
+
+        put16(ee + p, emit_alps ? 0x44CDu : 0x0010u);
+        put16(ee + p + 2u, (uint16_t)body_len);
+        memcpy(ee + p + 4u, body, body_len);
+        p += 4u + body_len;
+    }
+    put16(ee, (uint16_t)(p - 2u));
+    memset(s, 0, sizeof *s);
+    s->cfg.fp = fp;
+    s->st = QN_TLS_ST_WAIT_EE;
+    stage_hs(s, HS_ENCRYPTED_EXT, ee, p);
+    return qn_tls13_dispatch(s, NULL);
+}
+
+static void test_tls13_alps_negotiation(void)
+{
+    static const uint8_t unknown[] = { 0u, 4u, 0x12u, 0x34u, 0u, 0u };
+    qn_tls_session s;
+
+    CHECK(select_alps(QN_TLS_FP_CHROME, false, false, &s) == QN_TLS_RC_OK);
+    CHECK(s.alps_negotiated && s.alps_len == 15u && !strcmp(s.alpn, "h2"));
+    CHECK(select_alps(QN_TLS_FP_CHROME, true, false, &s) == QN_TLS_RC_OK);
+    CHECK(select_alps(QN_TLS_FP_FIREFOX, false, false, &s) == QN_TLS_RC_PROTO);
+    CHECK(select_alps(QN_TLS_FP_CHROME, false, true, &s) == QN_TLS_RC_PROTO);
+
+    memset(&s, 0, sizeof s);
+    s.cfg.fp = QN_TLS_FP_CHROME;
+    s.st = QN_TLS_ST_WAIT_EE;
+    stage_hs(&s, HS_ENCRYPTED_EXT, unknown, sizeof unknown);
+    CHECK(qn_tls13_dispatch(&s, NULL) == QN_TLS_RC_PROTO);
+}
+
+static qn_tls_rc select_ech_retry(const uint8_t *list, size_t list_len,
+                                  bool offered, qn_tls_session *s)
+{
+    uint8_t ee[128];
+
+    CHECK(list_len <= sizeof ee - 6u);
+    put16(ee, (uint16_t)(list_len + 4u));
+    put16(ee + 2u, 0xFE0Du);
+    put16(ee + 4u, (uint16_t)list_len);
+    memcpy(ee + 6u, list, list_len);
+    memset(s, 0, sizeof *s);
+    s->cfg.fp = QN_TLS_FP_CHROME;
+    s->ech_payload_len = offered ? 144u : 0u;
+    s->st = QN_TLS_ST_WAIT_EE;
+    stage_hs(s, HS_ENCRYPTED_EXT, ee, list_len + 6u);
+    return qn_tls13_dispatch(s, NULL);
+}
+
+static void test_tls13_ech_retry_configs(void)
+{
+    static const uint8_t cloudflare[] = {
+        0x00, 0x45, 0xFE, 0x0D, 0x00, 0x41, 0x77, 0x00, 0x20, 0x00, 0x20,
+        0x41, 0x53, 0x7A, 0x70, 0x27, 0x89, 0x17, 0xF8, 0xC0, 0xA7, 0xB0,
+        0x71, 0xEC, 0x5D, 0x1A, 0xFD, 0x5D, 0x33, 0xAE, 0x4B, 0x7C, 0x12,
+        0xDB, 0x6C, 0x6C, 0x99, 0x93, 0xB5, 0x1F, 0x22, 0x1A, 0x39, 0x00,
+        0x04, 0x00, 0x01, 0x00, 0x01, 0x00, 0x12, 0x63, 0x6C, 0x6F, 0x75,
+        0x64, 0x66, 0x6C, 0x61, 0x72, 0x65, 0x2D, 0x65, 0x63, 0x68, 0x2E,
+        0x63, 0x6F, 0x6D, 0x00, 0x00
+    };
+    uint8_t bad[sizeof cloudflare];
+    qn_tls_session s;
+
+    CHECK(select_ech_retry(cloudflare, sizeof cloudflare, true, &s) == QN_TLS_RC_OK);
+    CHECK(s.ech_retry_received && s.st == QN_TLS_ST_WAIT_FIN);
+    CHECK(select_ech_retry(cloudflare, sizeof cloudflare, false, &s) == QN_TLS_RC_PROTO);
+
+    memcpy(bad, cloudflare, sizeof bad);
+    bad[1]--;
+    CHECK(select_ech_retry(bad, sizeof bad, true, &s) == QN_TLS_RC_PROTO);
+    memcpy(bad, cloudflare, sizeof bad);
+    bad[44] = 0u;
+    bad[45] = 3u;
+    CHECK(select_ech_retry(bad, sizeof bad, true, &s) == QN_TLS_RC_PROTO);
+}
+
+static void test_tls13_certificate_compression_negotiation(void)
+{
+    qn_tls_session s;
+
+    /* RFC 8879 makes ClientHello compress_certificate unidirectional. */
+    CHECK(send_compress_certificate_ee(QN_TLS_FP_CHROME, 2u, &s) == QN_TLS_RC_PROTO);
+    CHECK(send_compress_certificate_ee(QN_TLS_FP_FIREFOX, 1u, &s) == QN_TLS_RC_PROTO);
+    CHECK(send_compress_certificate_ee(QN_TLS_FP_SAFARI, 1u, &s) == QN_TLS_RC_PROTO);
 }
 
 /* QN2-025: ServerKeyExchange must carry complete signature framing. */
@@ -1376,6 +1914,20 @@ static void test_tls13_compressed_certificate_framing(void)
     CHECK(s.peer_cn[0] == '\0');
     CHECK(qn_tls_cert_status(&s) == QN_TLS_CERT_OPAQUE);
 
+    msg[1] = 1u;
+    memset(&s, 0, sizeof s);
+    s.cfg.fp = QN_TLS_FP_FIREFOX;
+    s.st = QN_TLS_ST_WAIT_FIN;
+    stage_hs(&s, 25u, msg, sizeof msg);
+    CHECK(qn_tls13_dispatch(&s, NULL) == QN_TLS_RC_OK);
+    CHECK(s.cert_compression_alg == 1u);
+    memset(&s, 0, sizeof s);
+    s.cfg.fp = QN_TLS_FP_SAFARI;
+    s.st = QN_TLS_ST_WAIT_FIN;
+    stage_hs(&s, 25u, msg, sizeof msg);
+    CHECK(qn_tls13_dispatch(&s, NULL) == QN_TLS_RC_OK);
+    msg[1] = 2u;
+
     /* Strict mode: the same framing is validated and then refused. */
     memset(&s, 0, sizeof s);
     s.st             = QN_TLS_ST_WAIT_FIN;
@@ -1460,7 +2012,7 @@ static void test_tls13_compressed_certificate_framing(void)
         CHECK(qn_tls13_dispatch(&s, NULL) == QN_TLS_RC_PROTO);
     }
 
-    /* An algorithm we never offered is unsupported, not a certificate. */
+    /* A compressed message must use an algorithm offered by the active profile. */
     {
         uint8_t bad[sizeof msg];
 
@@ -1469,7 +2021,7 @@ static void test_tls13_compressed_certificate_framing(void)
         memset(&s, 0, sizeof s);
         s.st = QN_TLS_ST_WAIT_FIN;
         stage_hs(&s, 25u, bad, sizeof bad);
-        CHECK(qn_tls13_dispatch(&s, NULL) == QN_TLS_RC_UNSUPPORTED);
+        CHECK(qn_tls13_dispatch(&s, NULL) == QN_TLS_RC_PROTO);
         CHECK(!s.saw_certificate && !s.cert_compressed);
     }
 }
@@ -1547,8 +2099,155 @@ static void test_tls12_new_ticket_sequence(void)
     CHECK(qn_tls12_dispatch(&s, NULL) == QN_TLS_RC_OK);
 }
 
+/* A hello that offers only what this build can finish. If this ever stops
+   assessing EXACT, the exact state has become unreachable again. */
+static void fill_completable_hello(qn_hello_info *info)
+{
+    memset(info, 0, sizeof *info);
+    info->ciphers[0] = 0x1301u;
+    info->nciphers = 1u;
+    info->exts[0] = 0x0000u; /* sni */
+    info->exts[1] = 0x000Au; /* supported_groups */
+    info->exts[2] = 0x000Bu; /* ec_point_formats */
+    info->exts[3] = 0x000Du; /* signature_algorithms */
+    info->exts[4] = 0x0010u; /* alpn */
+    info->exts[5] = 0x0033u; /* key_share */
+    info->exts[6] = 0x002Bu; /* supported_versions */
+    info->nexts = 7u;
+    info->groups[0] = QN_GROUP_X25519;
+    info->ngroups = 1u;
+    info->keyshares[0] = QN_GROUP_X25519;
+    info->keyshare_lens[0] = QN_X25519_LEN;
+    info->nkeyshares = 1u;
+    info->sigalgs[0] = 0x0403u;
+    info->nsigalgs = 1u;
+    info->versions[0] = 0x0304u;
+    info->nversions = 1u;
+    info->ecpf[0] = 0u;
+    info->necpf = 1u;
+    info->has_sni = true;
+    info->has_alpn = true;
+    info->alpn_capable = true;
+    qn_strlcpy(info->alpn_first, "h2", sizeof info->alpn_first);
+}
+
+static void test_capability_assessment(void)
+{
+    qn_capability_report report;
+    qn_hello_info        info;
+    qn_tls_fp            fp;
+
+    /* The exact state is reachable, so the label is a measurement not a constant. */
+    fill_completable_hello(&info);
+    qn_tls_capability_assess(&info, false, &report);
+    CHECK(report.support == QN_PROFILE_EXACT);
+    CHECK(report.ngaps == 0u && !report.truncated);
+
+    /* Offering a group we cannot do is owed work even when nothing else is. */
+    fill_completable_hello(&info);
+    info.groups[info.ngroups++] = 0x0018u; /* secp384r1 */
+    qn_tls_capability_assess(&info, false, &report);
+    CHECK(report.support == QN_PROFILE_CAPABILITY_CONSTRAINED);
+    CHECK(report.ngaps == 1u);
+    CHECK(report.gap[0].kind == QN_CAPABILITY_GAP_GROUP);
+    CHECK(report.gap[0].codepoint == 0x0018u);
+
+    /* A signature scheme binds us only where a signature is actually checked. */
+    fill_completable_hello(&info);
+    info.sigalgs[info.nsigalgs++] = 0x0201u; /* rsa_pkcs1_sha1 */
+    qn_tls_capability_assess(&info, false, &report);
+    CHECK(report.support == QN_PROFILE_EXACT);
+    qn_tls_capability_assess(&info, true, &report);
+    CHECK(report.support == QN_PROFILE_CAPABILITY_CONSTRAINED);
+    CHECK(report.ngaps == 1u && report.gap[0].kind == QN_CAPABILITY_GAP_SIGALG);
+
+    /* Chain compression is offered and never completed; that is the deviation. */
+    fill_completable_hello(&info);
+    info.exts[info.nexts++] = 0x001Bu;
+    qn_tls_capability_assess(&info, false, &report);
+    CHECK(report.support == QN_PROFILE_CAPABILITY_CONSTRAINED);
+    CHECK(report.ngaps == 1u && report.gap[0].kind == QN_CAPABILITY_GAP_EXTENSION);
+    CHECK(report.gap[0].codepoint == 0x001Bu);
+
+    /* A truncated parse proves nothing, so it is unsupported, not constrained. */
+    fill_completable_hello(&info);
+    info.overflow = true;
+    qn_tls_capability_assess(&info, false, &report);
+    CHECK(report.support == QN_PROFILE_UNSUPPORTED);
+
+    /* A hello that cannot even start is unsupported, not merely constrained. */
+    memset(&info, 0, sizeof info);
+    qn_tls_capability_assess(&info, false, &report);
+    CHECK(report.support == QN_PROFILE_UNSUPPORTED);
+    qn_tls_capability_assess(NULL, false, &report);
+    CHECK(report.support == QN_PROFILE_UNSUPPORTED);
+
+    /* Every shipped persona still owes chain decompression, so none is exact. */
+    for (fp = QN_TLS_FP_CHROME; fp < QN_TLS_FP_RANDOM; fp++) {
+        qn_hello_req req;
+        uint8_t      wire[4096];
+        int          n;
+        size_t       i;
+        bool         saw_cert_compression = false;
+
+        memset(&req, 0, sizeof req);
+        fill_hello_material(&req);
+        req.sni = "www.cloudflare.com";
+        req.fp = fp;
+        req.allow_tls12 = true;
+        req.grease_seed = 0x0123456789ABCDEFull;
+        n = qn_tls_hello_build(&req, wire, sizeof wire, &info);
+        CHECK(n > 0);
+        if (n <= 0)
+            continue;
+        qn_tls_capability_assess(&info, req.allow_tls12, &report);
+        CHECK(report.support == QN_PROFILE_CAPABILITY_CONSTRAINED);
+        for (i = 0; i < report.ngaps; i++)
+            if (report.gap[i].kind == QN_CAPABILITY_GAP_EXTENSION &&
+                report.gap[i].codepoint == 0x001Bu)
+                saw_cert_compression = true;
+        CHECK(saw_cert_compression);
+    }
+}
+
+/* Only the order is permuted per connection, so one assessment speaks for all. */
+static void test_capability_is_stable_across_grease(void)
+{
+    qn_capability_report first, other;
+    qn_hello_info        info;
+    qn_hello_req         req;
+    uint8_t              wire[4096];
+    uint64_t             seed;
+
+    memset(&req, 0, sizeof req);
+    fill_hello_material(&req);
+    req.sni = "www.cloudflare.com";
+    req.fp = QN_TLS_FP_CHROME;
+    req.allow_tls12 = true;
+
+    req.grease_seed = 1u;
+    CHECK(qn_tls_hello_build(&req, wire, sizeof wire, &info) > 0);
+    qn_tls_capability_assess(&info, req.allow_tls12, &first);
+
+    for (seed = 2u; seed < 24u; seed++) {
+        size_t i;
+
+        req.grease_seed = seed * 0x9E3779B97F4A7C15ull;
+        CHECK(qn_tls_hello_build(&req, wire, sizeof wire, &info) > 0);
+        qn_tls_capability_assess(&info, req.allow_tls12, &other);
+        CHECK(other.support == first.support);
+        CHECK(other.ngaps == first.ngaps);
+        for (i = 0; i < first.ngaps && i < other.ngaps; i++)
+            CHECK(other.gap[i].codepoint == first.gap[i].codepoint);
+    }
+}
+
 int main(void)
 {
+    test_capability_assessment();
+    test_capability_is_stable_across_grease();
+    test_mlkem768_kat();
+    test_p256_kat();
     test_tls12_sequence_wrap();
     test_tls12_server_kx_signature_framing();
     test_tls12_flight_order();
@@ -1556,17 +2255,25 @@ int main(void)
     test_tls12_certificate_framing();
     test_tls13_key_update_is_typed();
     test_tls13_cert_verify_capability();
+    test_tls13_alps_negotiation();
+    test_tls13_ech_retry_configs();
+    test_tls13_certificate_compression_negotiation();
     test_tls13_compressed_certificate_framing();
     test_tls13_certificate_framing();
     test_tls13_rejects_plaintext_alert_after_keys();
     test_tls12_new_ticket_sequence();
     test_no_duplicate_extensions();
+    test_extension_body_validation();
     test_hello_wire_contract();
+    test_android_http1_profiles();
+    test_http2_profile_settings();
     test_profile_instance_wire_identity();
+    test_profile_connection_variation();
     test_hello_shape();
     test_fp_parse();
     test_random_requires_instance();
     test_server_hello_validation();
+    test_hybrid_server_hello();
     test_server_hello_split_points();
     test_hrr_capability_path();
 

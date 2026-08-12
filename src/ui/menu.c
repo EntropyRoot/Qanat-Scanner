@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
 
 typedef enum {
     INPUT_OK = 0,
@@ -56,6 +58,27 @@ static input_result read_line(const char *prompt, char *buf, size_t cap)
             memmove(buf, first, (size_t)(last - first) + 1u);
     }
     return INPUT_OK;
+}
+
+static input_result read_secret_line(const char *prompt, char *buffer, size_t capacity)
+{
+    struct termios original;
+    struct termios hidden;
+    bool tty = isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &original) == 0;
+    input_result result;
+
+    if (tty) {
+        hidden = original;
+        hidden.c_lflag &= (tcflag_t)~ECHO;
+        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) != 0)
+            tty = false;
+    }
+    result = read_line(prompt, buffer, capacity);
+    if (tty) {
+        (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+        fputc('\n', stdout);
+    }
+    return result;
 }
 
 static bool decimal_u32(const char *s, uint32_t *out)
@@ -749,6 +772,158 @@ static input_result scan_plan_settings(qn_config *cfg)
     }
 }
 
+static input_result edit_tunnel_link(qn_config *cfg)
+{
+    char link[QN_TUNNEL_LINK_MAX + 1u];
+    qn_tunnel_link parsed;
+    qn_tunnel_parse_code code;
+    input_result result;
+
+    result = read_secret_line("Paste tunnel link (input hidden): ", link, sizeof link);
+    if (result != INPUT_OK)
+        return result;
+    if (!link[0])
+        return INPUT_OK;
+    code = qn_tunnel_link_parse_cstr(link, &parsed);
+    if (code != QN_TUNNEL_PARSE_OK) {
+        printf("Link rejected: %s\n", qn_tunnel_parse_str(code));
+        memset(link, 0, sizeof link);
+        return INPUT_OK;
+    }
+    memcpy(cfg->input_tunnel_link, link, strlen(link) + 1u);
+    memset(link, 0, sizeof link);
+    qn_tunnel_link_clear(&parsed);
+    cfg->tunnel_link = cfg->input_tunnel_link;
+    cfg->tunnel_link_file = NULL;
+    puts("Tunnel link accepted; credential will not be displayed or exported.");
+    return INPUT_OK;
+}
+
+static input_result edit_tunnel_link_file(qn_config *cfg)
+{
+    char path[sizeof cfg->input_tunnel_file];
+    input_result result = read_line("Private link file path: ", path, sizeof path);
+
+    if (result != INPUT_OK || !path[0])
+        return result;
+    qn_strlcpy(cfg->input_tunnel_file, path, sizeof cfg->input_tunnel_file);
+    cfg->tunnel_link_file = cfg->input_tunnel_file;
+    cfg->tunnel_link = NULL;
+    return INPUT_OK;
+}
+
+static input_result edit_xray_path(qn_config *cfg)
+{
+    char path[sizeof cfg->input_xray_path];
+    input_result result = read_line("Xray path [auto]: ", path, sizeof path);
+
+    if (result != INPUT_OK)
+        return result;
+    if (!path[0]) {
+        cfg->xray_path = "auto";
+        cfg->input_xray_path[0] = '\0';
+        return INPUT_OK;
+    }
+    qn_strlcpy(cfg->input_xray_path, path, sizeof cfg->input_xray_path);
+    cfg->xray_path = cfg->input_xray_path;
+    return INPUT_OK;
+}
+
+static void xray_install_menu(qn_config *cfg)
+{
+    uint32_t confirm = 0u;
+    char resolved[QN_TUNNEL_XRAY_PATH_MAX + 1u];
+    char target[QN_TUNNEL_XRAY_PATH_MAX + 1u];
+    qn_xray_find_code state = qn_xray_find("auto", resolved, sizeof resolved);
+
+    if (state == QN_XRAY_FOUND)
+        printf("Xray is already available at %s.\n", resolved);
+    puts("Install/update is a separate opt-in network operation.");
+    puts("Source: official XTLS/Xray-core Android ARM64 release asset.");
+    puts("The matching .dgst SHA-256 is verified before atomic installation.");
+    if (qn_xray_install_target(target, sizeof target))
+        printf("Installation target: %s\n", target);
+    if (ask_choice("Enter 1 to download and install, or 0 to cancel: ",
+                   1u, &confirm) == INPUT_OK && confirm) {
+        qn_xray_install_code result = qn_xray_install(resolved,
+                                                       sizeof resolved);
+
+        printf("Xray install outcome: %s", qn_xray_install_str(result));
+        if (result == QN_XRAY_INSTALL_OK) {
+            printf(" at %s", resolved);
+            qn_strlcpy(cfg->input_xray_path, resolved,
+                       sizeof cfg->input_xray_path);
+            cfg->xray_path = cfg->input_xray_path;
+        }
+        putchar('\n');
+    }
+}
+
+static input_result tunnel_settings(qn_config *cfg)
+{
+    for (;;) {
+        qn_scan_request *request = &cfg->scan;
+        uint32_t choice;
+        input_result result;
+        char xray[QN_TUNNEL_XRAY_PATH_MAX + 1u];
+        qn_xray_find_code state = qn_xray_find(cfg->xray_path, xray, sizeof xray);
+
+        printf("\nTunnel verification (real external traffic)\n"
+               "  1) Stage                 %s\n"
+               "  2) Candidate target      %s%" PRIu64 "\n"
+               "  3) Concurrency           %u\n"
+               "  4) Attempts              %u\n"
+               "  5) Paste link            %s\n"
+               "  6) Link file             %s\n"
+               "  7) Xray path             %s (%s)\n"
+               "  8) Install/update Xray\n"
+               "  0) Done\n",
+               request->tunnel_enabled ? "enabled" : "off",
+               request->tunnel_all ? "all selected; current bound " : "",
+               request->tunnel_target, request->tunnel_concurrency,
+               request->tunnel_attempts,
+               cfg->tunnel_link ? "configured (hidden)" : "not configured",
+               cfg->tunnel_link_file ? cfg->tunnel_link_file : "not configured",
+               cfg->xray_path ? cfg->xray_path : "auto", qn_xray_find_str(state));
+        result = ask_choice("Select tunnel setting: ", 8u, &choice);
+        if (result != INPUT_OK || !choice)
+            return result;
+        if (choice == 1u) {
+            request->tunnel_enabled = !request->tunnel_enabled;
+            if (request->tunnel_enabled && !request->tunnel_target)
+                request->tunnel_target = 5u;
+            result = INPUT_OK;
+        } else if (choice == 2u) {
+            uint64_t target = request->tunnel_all ? 0u : request->tunnel_target;
+
+            result = edit_u64("Tunnel target (0 = All)", &target,
+                              1u, UINT32_MAX, true);
+            if (result == INPUT_OK) {
+                request->tunnel_all = target == 0u;
+                request->tunnel_target = target;
+                request->tunnel_enabled = true;
+            }
+        } else if (choice == 3u) {
+            result = edit_u32("Tunnel concurrency", &request->tunnel_concurrency,
+                              1u, 32u, false);
+        } else if (choice == 4u) {
+            result = edit_u32("Tunnel attempts", &request->tunnel_attempts,
+                              1u, 2u, false);
+        } else if (choice == 5u) {
+            result = edit_tunnel_link(cfg);
+        } else if (choice == 6u) {
+            result = edit_tunnel_link_file(cfg);
+        } else if (choice == 7u) {
+            result = edit_xray_path(cfg);
+        } else {
+            xray_install_menu(cfg);
+            result = INPUT_OK;
+        }
+        if (result != INPUT_OK)
+            return result;
+    }
+}
+
 static input_result cdn_settings(qn_config *cfg)
 {
     for (;;) {
@@ -764,13 +939,14 @@ static input_result cdn_settings(qn_config *cfg)
                "  6) Fingerprint           %s\n"
                "  7) Flow bytes            %u%s\n"
                "  8) Idle hold             %u ms%s\n"
-               "  9) Engine settings\n"
+               "  9) Tunnel verification\n"
+               " 10) Engine settings\n"
                "  0) Done\n",
                cfg->sni, cfg->samples, cfg->timeout_ms, cfg->deep ? "deep" : "quick",
                qn_tls_fp_str((qn_tls_fp)cfg->fingerprint), cfg->flow_bytes,
                cfg->flow_bytes ? "" : " (off)", cfg->idle_ms,
                cfg->idle_ms ? "" : " (off)");
-        rc = ask_choice("Select setting: ", 9u, &choice);
+        rc = ask_choice("Select setting: ", 10u, &choice);
         if (rc != INPUT_OK)
             return rc;
         if (!choice)
@@ -800,6 +976,8 @@ static input_result cdn_settings(qn_config *cfg)
             rc = edit_u32("Flow bytes (0 = off)", &cfg->flow_bytes, 1u, 16u << 20, true);
         } else if (choice == 8u) {
             rc = edit_u32("Idle hold (ms, 0 = off)", &cfg->idle_ms, 1u, 60000u, true);
+        } else if (choice == 9u) {
+            rc = tunnel_settings(cfg);
         } else {
             rc = common_settings(cfg);
         }
@@ -969,6 +1147,34 @@ static bool ready_to_start(qn_config *cfg, uint32_t selected, input_result *inpu
         if (!qn_scan_request_validate(&cfg->scan, error, sizeof error)) {
             printf("Invalid Scan Plan: %s\n", error);
             return false;
+        }
+        if (cfg->scan.tunnel_enabled) {
+            qn_tunnel_link parsed;
+            qn_tunnel_parse_code code;
+            uint32_t tunnel_confirm;
+
+            if (!cfg->tunnel_link && cfg->tunnel_link_file) {
+                puts("The link file is validated when the run starts.");
+            } else {
+                code = qn_tunnel_link_parse_cstr(cfg->tunnel_link, &parsed);
+                if (code != QN_TUNNEL_PARSE_OK) {
+                    printf("Tunnel link is missing or invalid: %s\n",
+                           qn_tunnel_parse_str(code));
+                    return false;
+                }
+                qn_tunnel_link_clear(&parsed);
+            }
+            printf("Tunnel traffic destination: www.cloudflare.com:443; candidates: %s%" PRIu64
+                   "; concurrency: %u; attempts: %u.\n",
+                   cfg->scan.tunnel_all ? "all, current bound " : "",
+                   cfg->scan.tunnel_all ? cfg->scan.finalist_limit
+                                        : cfg->scan.tunnel_target,
+                   cfg->scan.tunnel_concurrency, cfg->scan.tunnel_attempts);
+            *input = ask_choice("Enter 1 to authorize this real traffic or 0 to cancel: ",
+                                1u, &tunnel_confirm);
+            if (*input != INPUT_OK || !tunnel_confirm)
+                return false;
+            cfg->tunnel_confirmed = true;
         }
         if (cfg->scan.mode == QN_SCAN_FULL ||
             (cfg->scan.mode == QN_SCAN_COVERAGE &&

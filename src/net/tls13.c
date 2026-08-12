@@ -15,11 +15,11 @@
 #define EXT_EMS                0x0017
 #define EXT_ALPN               0x0010
 #define EXT_SERVER_NAME        0x0000
-#define EXT_COMPRESS_CERT      0x001B
+#define EXT_SUPPORTED_GROUPS   0x000A
 #define EXT_RECORD_SIZE_LIMIT  0x001C
 #define EXT_COOKIE             0x002C
-#define GROUP_X25519           0x001D
-
+#define EXT_ENCRYPTED_CLIENT_HELLO 0xFE0D
+#define EXT_APPLICATION_SETTINGS 0x44CD
 /* RFC 8879: selected when the ClientHello offers compress_certificate. */
 #define HS_COMPRESSED_CERT 25u
 #define HS_MESSAGE_HASH     254u
@@ -144,6 +144,146 @@ static bool suite_params(uint16_t suite, qn_hash_id *h, qn_aead_id *a)
     return qn_tls_capability_suite(suite, 0x0304u, h, a, NULL);
 }
 
+static qn_tls_fp session_fp(const qn_tls_session *s)
+{
+    return s->cfg.profile ? s->cfg.profile->resolved : s->cfg.fp;
+}
+
+static bool session_allow_tls12(const qn_tls_session *s)
+{
+    return s->cfg.profile ? s->cfg.profile->allow_tls12 : s->cfg.allow_tls12;
+}
+
+static bool session_cert_strict(const qn_tls_session *s)
+{
+    return s->cfg.profile ? s->cfg.profile->cert_strict : s->cfg.cert_strict;
+}
+
+static bool cert_compression_offered(const qn_tls_session *s, uint16_t algorithm)
+{
+    switch (session_fp(s)) {
+    case QN_TLS_FP_CHROME:  return algorithm == 2u;
+    case QN_TLS_FP_FIREFOX: return algorithm >= 1u && algorithm <= 3u;
+    case QN_TLS_FP_SAFARI:  return algorithm == 1u;
+    case QN_TLS_FP_RANDOM:  return algorithm == 2u;
+    default:                return false;
+    }
+}
+
+static bool alps_setting_valid(const uint8_t setting[6])
+{
+    uint16_t id = rd16(setting);
+    uint32_t value = ((uint32_t)setting[2] << 24) |
+                     ((uint32_t)setting[3] << 16) |
+                     ((uint32_t)setting[4] << 8) | setting[5];
+
+    if (id == 2u && value > 1u)
+        return false;
+    if (id == 4u && value > 0x7FFFFFFFu)
+        return false;
+    return id != 5u || (value >= 16384u && value <= 16777215u);
+}
+
+static bool alps_h2_valid(const uint8_t *data, size_t len)
+{
+    size_t off = 0u;
+
+    while (off < len) {
+        uint32_t frame_len, stream;
+        uint8_t type, flags;
+        size_t i;
+
+        if (len - off < 9u)
+            return false;
+        frame_len = ((uint32_t)data[off] << 16) |
+                    ((uint32_t)data[off + 1u] << 8) | data[off + 2u];
+        type = data[off + 3u];
+        flags = data[off + 4u];
+        if (data[off + 5u] & 0x80u || frame_len > len - off - 9u)
+            return false;
+        stream = ((uint32_t)data[off + 5u] << 24) |
+                 ((uint32_t)data[off + 6u] << 16) |
+                 ((uint32_t)data[off + 7u] << 8) | data[off + 8u];
+        if (type == 4u) {
+            if (stream || flags || (frame_len % 6u) != 0u)
+                return false;
+            for (i = 0u; i < frame_len; i += 6u)
+                if (!alps_setting_valid(data + off + 9u + i))
+                    return false;
+        }
+        off += 9u + frame_len;
+    }
+    return true;
+}
+
+static bool ech_config_extensions_valid(const uint8_t *data, size_t len)
+{
+    size_t off = 0u;
+
+    while (off < len) {
+        size_t body_len;
+
+        if (len - off < 4u)
+            return false;
+        body_len = rd16(data + off + 2u);
+        if (body_len > len - off - 4u)
+            return false;
+        off += 4u + body_len;
+    }
+    return true;
+}
+
+static bool ech_config_valid(uint16_t version, const uint8_t *data, size_t len)
+{
+    br             r;
+    uint16_t       public_key_len, cipher_suites_len, extensions_len;
+    uint8_t        public_name_len;
+    const uint8_t *extensions;
+
+    if (version != EXT_ENCRYPTED_CLIENT_HELLO)
+        return true;
+    br_init(&r, data, len);
+    (void)br_u8(&r);
+    (void)br_u16(&r);
+    public_key_len = br_u16(&r);
+    if (!public_key_len || !br_take(&r, public_key_len))
+        return false;
+    cipher_suites_len = br_u16(&r);
+    if (!cipher_suites_len || (cipher_suites_len & 3u) ||
+        !br_take(&r, cipher_suites_len))
+        return false;
+    (void)br_u8(&r);
+    public_name_len = br_u8(&r);
+    if (!public_name_len || !br_take(&r, public_name_len))
+        return false;
+    extensions_len = br_u16(&r);
+    extensions = br_take(&r, extensions_len);
+    return extensions && !r.err && !br_left(&r) &&
+           ech_config_extensions_valid(extensions, extensions_len);
+}
+
+static bool ech_config_list_valid(const uint8_t *data, size_t len)
+{
+    size_t off = 2u;
+
+    if (len < 6u || !rd16(data) || rd16(data) != len - 2u)
+        return false;
+    while (off < len) {
+        uint16_t version, config_len;
+
+        if (len - off < 4u)
+            return false;
+        version = rd16(data + off);
+        config_len = rd16(data + off + 2u);
+        off += 4u;
+        if (config_len > len - off ||
+            !ech_config_valid(version, data + off, config_len))
+            return false;
+        off += config_len;
+    }
+    return off == len;
+}
+
 void qn_tls_init(qn_tls_session *s, const qn_tls_config *cfg)
 {
     memset(s, 0, sizeof *s);
@@ -161,47 +301,107 @@ void qn_tls_free(qn_tls_session *s)
     qn_wipe(s, sizeof *s);
 }
 
+static bool session_bytes(qn_tls_session *s, void *out, size_t len)
+{
+    if (s->cfg.rng) {
+        qn_rng_bytes(s->cfg.rng, out, len);
+        return true;
+    }
+    return qn_random_secure(out, len);
+}
+
+static bool session_hello_keys(qn_tls_session *s)
+{
+    uint8_t mlkem_seed[QN_MLKEM_KEYGEN_SEED_LEN];
+    uint8_t hybrid_pk[QN_X25519_LEN];
+    uint8_t ech_sk[QN_X25519_LEN];
+    bool ok;
+
+    ok = session_bytes(s, mlkem_seed, sizeof mlkem_seed) &&
+         qn_mlkem768_keypair(s->hybrid_share, s->mlkem_sk, mlkem_seed) &&
+         qn_x25519_keypair(s->hybrid_x_sk, hybrid_pk, s->cfg.rng) &&
+         qn_x25519_keypair(s->x_sk, s->x_pk, s->cfg.rng) &&
+         qn_p256_keypair(s->p256_sk, s->p256_pk, s->cfg.rng) &&
+         qn_x25519_keypair(ech_sk, s->ech_enc, s->cfg.rng) &&
+         session_bytes(s, s->ech_payload, sizeof s->ech_payload) &&
+         session_bytes(s, &s->ech_config_id, sizeof s->ech_config_id);
+    if (ok)
+        memcpy(s->hybrid_share + QN_MLKEM768_PUBLIC_LEN,
+               hybrid_pk, sizeof hybrid_pk);
+    qn_wipe(mlkem_seed, sizeof mlkem_seed);
+    qn_wipe(hybrid_pk, sizeof hybrid_pk);
+    qn_wipe(ech_sk, sizeof ech_sk);
+    return ok;
+}
+
+static void session_hello_request(const qn_tls_session *s, qn_hello_req *req,
+                                  qn_hello_key_share shares[3], uint16_t selected_group)
+{
+    memset(req, 0, sizeof *req);
+    req->sni = s->cfg.profile ? s->cfg.profile->sni : s->cfg.sni;
+    req->fp = s->cfg.profile ? s->cfg.profile->resolved : s->cfg.fp;
+    req->allow_tls12 = s->cfg.profile ? s->cfg.profile->allow_tls12
+                                      : s->cfg.allow_tls12;
+    req->grease_seed = s->hello_grease_seed;
+    memcpy(req->random, s->client_random, sizeof req->random);
+    memcpy(req->session_id, s->session_id, sizeof req->session_id);
+    shares[0] = (qn_hello_key_share){ QN_GROUP_X25519_MLKEM768,
+                                      s->hybrid_share,
+                                      QN_HYBRID_CLIENT_SHARE_LEN };
+    shares[1] = (qn_hello_key_share){ QN_GROUP_X25519, s->x_pk, QN_X25519_LEN };
+    shares[2] = (qn_hello_key_share){ QN_GROUP_P256, s->p256_pk,
+                                      QN_P256_PUBLIC_LEN };
+    req->key_shares = shares;
+    req->key_shares_n = 3u;
+    req->selected_group = selected_group;
+    req->ech_config_id = s->ech_config_id;
+    req->ech_aead = s->ech_aead;
+    memcpy(req->ech_enc, s->ech_enc, sizeof req->ech_enc);
+    req->ech_payload = s->ech_payload;
+    req->ech_payload_len = s->ech_payload_len;
+}
+
 int qn_tls_start(qn_tls_session *s, uint8_t *out, size_t cap)
 {
     qn_hello_req  req;
     qn_hello_info info;
+    qn_hello_key_share shares[3];
+    qn_tls_fp     hello_fp;
     int           n;
 
-    if (s->st != QN_TLS_ST_NEW || !out)
+    if (s->st != QN_TLS_ST_NEW || !out ||
+        (s->cfg.profile &&
+         (s->cfg.profile->version != QN_PROFILE_INSTANCE_VERSION ||
+          s->cfg.profile->support == QN_PROFILE_UNSUPPORTED)))
         return -1;
 
-    memset(&req, 0, sizeof req);
-    req.sni = s->cfg.profile ? s->cfg.profile->sni : s->cfg.sni;
-    req.fp = s->cfg.profile ? s->cfg.profile->resolved : s->cfg.fp;
-    req.allow_tls12 = s->cfg.profile ? s->cfg.profile->allow_tls12
-                                     : s->cfg.allow_tls12;
-
     if (s->cfg.rng) {
+        s->hello_grease_seed = qn_rng_next(s->cfg.rng);
         qn_rng_bytes(s->cfg.rng, s->client_random, sizeof s->client_random);
         qn_rng_bytes(s->cfg.rng, s->session_id, sizeof s->session_id);
-        req.grease_seed = s->cfg.profile ? s->cfg.profile->grease_seed
-                                         : qn_rng_next(s->cfg.rng);
     } else {
-        if (!qn_random_secure(s->client_random, sizeof s->client_random) ||
-            !qn_random_secure(s->session_id, sizeof s->session_id) ||
-            (!s->cfg.profile &&
-             !qn_random_secure(&req.grease_seed, sizeof req.grease_seed))) {
+        if (!qn_random_secure(&s->hello_grease_seed,
+                              sizeof s->hello_grease_seed) ||
+            !qn_random_secure(s->client_random, sizeof s->client_random) ||
+            !qn_random_secure(s->session_id, sizeof s->session_id)) {
             errno = EIO;
             return -1;
         }
-        if (s->cfg.profile)
-            req.grease_seed = s->cfg.profile->grease_seed;
     }
+    if (s->cfg.profile)
+        s->hello_grease_seed ^= s->cfg.profile->grease_seed;
     s->session_id_len = sizeof s->session_id;
-    s->hello_grease_seed = req.grease_seed;
-    if (!qn_x25519_keypair(s->x_sk, s->x_pk, s->cfg.rng)) {
+    hello_fp = s->cfg.profile ? s->cfg.profile->resolved : s->cfg.fp;
+    s->ech_payload_len = hello_fp == QN_TLS_FP_CHROME
+                             ? (uint16_t)(144u + 32u * (s->hello_grease_seed & 3u))
+                             : (uint16_t)(QN_ECH_PAYLOAD_MAX - 1u);
+    s->ech_aead = hello_fp == QN_TLS_FP_FIREFOX ? 0x0003u : 0x0001u;
+    if (!session_hello_keys(s)) {
         errno = EIO;
         return -1;
     }
 
-    memcpy(req.random, s->client_random, sizeof req.random);
-    memcpy(req.session_id, s->session_id, sizeof req.session_id);
-    memcpy(req.key_share, s->x_pk, QN_X25519_LEN);
+    session_hello_request(s, &req, shares, 0u);
 
     n = qn_tls_hello_build(&req, out, cap, &info);
     if (n < 0 || info.body_len > sizeof s->ch)
@@ -314,13 +514,14 @@ static qn_tls_rc send_second_client_hello(qn_tls_session *s, qn_tls_io *io)
 {
     qn_hello_req req;
     qn_hello_info info;
+    qn_hello_key_share shares[3];
     qn_hash first;
     uint8_t digest[QN_HASH_MAX];
     uint8_t message_hash[4];
     size_t hlen = qn_hash_len(s->hash);
     int written;
 
-    if (!io->out || s->hrr_done || !s->hrr_cookie_len || !hlen)
+    if (!io->out || s->hrr_done || !hlen)
         return QN_TLS_RC_PROTO;
     qn_hash_init(&first, s->hash);
     qn_hash_update(&first, s->ch, s->ch_len);
@@ -336,15 +537,7 @@ static qn_tls_rc send_second_client_hello(qn_tls_session *s, qn_tls_io *io)
     qn_hash_update(&s->transcript, s->hs_hdr, sizeof s->hs_hdr);
     qn_hash_update(&s->transcript, s->hs, s->hs_kept);
 
-    memset(&req, 0, sizeof req);
-    req.sni = s->cfg.profile ? s->cfg.profile->sni : s->cfg.sni;
-    req.fp = s->cfg.profile ? s->cfg.profile->resolved : s->cfg.fp;
-    req.allow_tls12 = s->cfg.profile ? s->cfg.profile->allow_tls12
-                                     : s->cfg.allow_tls12;
-    req.grease_seed = s->hello_grease_seed;
-    memcpy(req.random, s->client_random, sizeof req.random);
-    memcpy(req.session_id, s->session_id, sizeof req.session_id);
-    memcpy(req.key_share, s->x_pk, sizeof req.key_share);
+    session_hello_request(s, &req, shares, s->hrr_group);
     req.cookie = s->hrr_cookie;
     req.cookie_len = s->hrr_cookie_len;
     written = qn_tls_hello_build(&req, io->out + io->outlen,
@@ -361,6 +554,47 @@ static qn_tls_rc send_second_client_hello(qn_tls_session *s, qn_tls_io *io)
     return QN_TLS_RC_OK;
 }
 
+static bool first_hello_has_group(const qn_tls_session *s, uint16_t group)
+{
+    qn_tls_fp fp = s->cfg.profile ? s->cfg.profile->resolved : s->cfg.fp;
+
+    return group == QN_GROUP_X25519_MLKEM768 || group == QN_GROUP_X25519 ||
+           (group == QN_GROUP_P256 && fp == QN_TLS_FP_FIREFOX);
+}
+
+static qn_tls_rc key_exchange_secret(qn_tls_session *s, uint16_t group,
+                                     const uint8_t *peer, size_t peer_len,
+                                     uint8_t out[64], size_t *out_len)
+{
+    if (group == QN_GROUP_X25519_MLKEM768) {
+        if (peer_len != QN_HYBRID_SERVER_SHARE_LEN)
+            return QN_TLS_RC_PROTO;
+        if (!qn_mlkem768_decap(out, peer, s->mlkem_sk) ||
+            !qn_x25519(out + QN_MLKEM_SHARED_LEN, s->hybrid_x_sk,
+                       peer + QN_MLKEM768_CIPHERTEXT_LEN))
+            return QN_TLS_RC_BADMAC;
+        *out_len = 2u * QN_MLKEM_SHARED_LEN;
+        return QN_TLS_RC_OK;
+    }
+    if (group == QN_GROUP_X25519) {
+        if (peer_len != QN_X25519_LEN)
+            return QN_TLS_RC_PROTO;
+        if (!qn_x25519(out, s->x_sk, peer))
+            return QN_TLS_RC_BADMAC;
+        *out_len = QN_X25519_LEN;
+        return QN_TLS_RC_OK;
+    }
+    if (group == QN_GROUP_P256) {
+        if (peer_len != QN_P256_PUBLIC_LEN)
+            return QN_TLS_RC_PROTO;
+        if (!qn_p256(out, s->p256_sk, peer))
+            return QN_TLS_RC_BADMAC;
+        *out_len = QN_P256_SECRET_LEN;
+        return QN_TLS_RC_OK;
+    }
+    return QN_TLS_RC_UNSUPPORTED;
+}
+
 static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
 {
     br             r;
@@ -373,13 +607,17 @@ static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
     uint8_t        compression;
     size_t         ext_end;
     bool           have_version = false, have_key_share = false, have_cookie = false;
+    bool           have_hrr_group = false;
     bool           have_ems = false, have_alpn = false;
     bool           is_hrr;
-    uint8_t        shared[QN_X25519_LEN];
+    uint16_t       peer_group = 0u;
+    size_t         peer_ks_len = 0u, shared_len = 0u;
+    uint8_t        shared[2u * QN_MLKEM_SHARED_LEN];
     uint8_t        early[QN_HASH_MAX], derived[QN_HASH_MAX], zeros[QN_HASH_MAX];
     qn_hash        empty;
     size_t         hlen;
     qn_tls_rc      rc = QN_TLS_RC_PROTO;
+    qn_tls_rc      kxrc;
 
     if (s->st != QN_TLS_ST_WAIT_SH || s->hs_len != s->hs_kept)
         return QN_TLS_RC_PROTO;
@@ -443,17 +681,26 @@ static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
             have_alpn = true;
         } else if (et == EXT_KEY_SHARE) {
             if (is_hrr) {
+                uint16_t group;
+
                 if (el != 2u)
                     return QN_TLS_RC_PROTO;
-                if (rd16(ev) == GROUP_X25519)
+                group = rd16(ev);
+                if (!qn_tls_capability_group(group))
+                    return QN_TLS_RC_UNSUPPORTED;
+                if (first_hello_has_group(s, group))
                     return QN_TLS_RC_PROTO;
-                return QN_TLS_RC_UNSUPPORTED;
+                s->hrr_group = group;
+                have_hrr_group = true;
+                continue;
             }
             if (el < 4u)
                 return QN_TLS_RC_PROTO;
-            if (rd16(ev) != GROUP_X25519)
+            peer_group = rd16(ev);
+            if (!qn_tls_capability_group(peer_group))
                 return QN_TLS_RC_UNSUPPORTED;
-            if (rd16(ev + 2) != QN_X25519_LEN || el != 4u + QN_X25519_LEN)
+            peer_ks_len = rd16(ev + 2u);
+            if (!peer_ks_len || peer_ks_len != el - 4u)
                 return QN_TLS_RC_PROTO;
             peer_ks = ev + 4;
             have_key_share = true;
@@ -479,7 +726,8 @@ static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
     if (is_hrr) {
         if (!have_version || sel_ver != 0x0304u ||
             sidlen != s->session_id_len || memcmp(sid, s->session_id, sidlen) != 0 ||
-            have_ems || have_alpn || have_key_share || !have_cookie ||
+            have_ems || have_alpn || have_key_share ||
+            (!have_cookie && !have_hrr_group) ||
             !suite_params(s->suite, &s->hash, &s->aead_id))
             return QN_TLS_RC_PROTO;
         s->version = 0x0304u;
@@ -488,7 +736,8 @@ static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
     }
 
     if (!have_version) {
-        if (!s->cfg.allow_tls12 || !qn_tls12_suite(s->suite, &s->hash, &s->aead_id))
+        if (!session_allow_tls12(s) ||
+            !qn_tls12_suite(s->suite, &s->hash, &s->aead_id))
             return QN_TLS_RC_UNSUPPORTED;
         if (have_key_share)
             return QN_TLS_RC_PROTO;
@@ -503,6 +752,9 @@ static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
             return QN_TLS_RC_PROTO;
         if (!suite_params(s->suite, &s->hash, &s->aead_id) || !have_key_share || !peer_ks)
             return QN_TLS_RC_UNSUPPORTED;
+        if ((s->hrr_done && s->hrr_group && peer_group != s->hrr_group) ||
+            (!s->hrr_done && !first_hello_has_group(s, peer_group)))
+            return QN_TLS_RC_PROTO;
     } else {
         return QN_TLS_RC_UNSUPPORTED;
     }
@@ -523,15 +775,18 @@ static qn_tls_rc on_server_hello(qn_tls_session *s, qn_tls_io *io)
     if (sel_ver == 0x0303)
         return qn_tls12_setup(s);
 
-    if (!qn_x25519(shared, s->x_sk, peer_ks))
-        return QN_TLS_RC_BADMAC;
+    kxrc = key_exchange_secret(s, peer_group, peer_ks, peer_ks_len,
+                               shared, &shared_len);
+    if (kxrc != QN_TLS_RC_OK)
+        return kxrc;
+    s->peer_group = peer_group;
 
     memset(zeros, 0, sizeof zeros);
     qn_hash_init(&empty, s->hash);
     qn_hkdf_extract(s->hash, NULL, 0, zeros, hlen, early);
 
     if (qn_derive_secret(s->hash, early, "derived", &empty, derived)) {
-        qn_hkdf_extract(s->hash, derived, hlen, shared, sizeof shared, s->hs_secret);
+        qn_hkdf_extract(s->hash, derived, hlen, shared, shared_len, s->hs_secret);
         if (qn_derive_secret(s->hash, s->hs_secret, "c hs traffic", &s->transcript, s->c_traffic) &&
             qn_derive_secret(s->hash, s->hs_secret, "s hs traffic", &s->transcript, s->s_traffic) &&
             derive_keys(s, &s->rd, s->s_traffic) && derive_keys(s, &s->wr, s->c_traffic)) {
@@ -578,9 +833,6 @@ static qn_tls_rc on_encrypted_extensions(qn_tls_session *s)
         } else if (et == EXT_SERVER_NAME) {
             if (el != 0u)
                 return QN_TLS_RC_PROTO;
-        } else if (et == EXT_COMPRESS_CERT) {
-            if (el != 2u || rd16(ev) != 2u) /* Brotli is the sole offered algorithm. */
-                return QN_TLS_RC_PROTO;
         } else if (et == EXT_RECORD_SIZE_LIMIT) {
             uint16_t lim;
             if (el != 2u)
@@ -588,9 +840,33 @@ static qn_tls_rc on_encrypted_extensions(qn_tls_session *s)
             lim = rd16(ev);
             if (lim < 64u || lim > 16385u)
                 return QN_TLS_RC_PROTO;
+        } else if (et == EXT_SUPPORTED_GROUPS) {
+            size_t i;
+
+            if (el < 4u || rd16(ev) != el - 2u || ((el - 2u) & 1u))
+                return QN_TLS_RC_PROTO;
+            for (i = 2u; i < el; i += 2u)
+                if (!rd16(ev + i))
+                    return QN_TLS_RC_PROTO;
+        } else if (et == EXT_ENCRYPTED_CLIENT_HELLO) {
+            if (s->ech_payload_len < 16u || !ech_config_list_valid(ev, el))
+                return QN_TLS_RC_PROTO;
+            s->ech_retry_received = true;
+        } else if (et == EXT_APPLICATION_SETTINGS) {
+            if (el > sizeof s->alps || !alps_h2_valid(ev, el))
+                return el > sizeof s->alps ? QN_TLS_RC_UNSUPPORTED
+                                           : QN_TLS_RC_PROTO;
+            memcpy(s->alps, ev, el);
+            s->alps_len = el;
+            s->alps_negotiated = true;
+        } else {
+            return QN_TLS_RC_PROTO;
         }
     }
     if (r.err || r.off != end)
+        return QN_TLS_RC_PROTO;
+    if (s->alps_negotiated &&
+        (session_fp(s) != QN_TLS_FP_CHROME || strcmp(s->alpn, "h2")))
         return QN_TLS_RC_PROTO;
 
     s->st = QN_TLS_ST_WAIT_FIN;
@@ -640,13 +916,15 @@ static qn_tls_rc on_certificate(qn_tls_session *s, bool compressed)
         return QN_TLS_RC_PROTO;
 
     if (compressed) {
+        uint16_t algorithm;
         uint32_t uncompressed, clen;
 
         /* RFC 8879 lengths are checked against the message even when only a large chain's head is retained. */
         if (s->hs_kept < 8u)
             return QN_TLS_RC_PROTO;
-        if (rd16(s->hs) != 2u) /* only brotli was offered */
-            return QN_TLS_RC_UNSUPPORTED;
+        algorithm = rd16(s->hs);
+        if (!cert_compression_offered(s, algorithm))
+            return QN_TLS_RC_PROTO;
         uncompressed = rd24(s->hs + 2);
         clen         = rd24(s->hs + 5);
         if (!uncompressed || uncompressed > QN_TLS_CERT_MAX)
@@ -654,9 +932,10 @@ static qn_tls_rc on_certificate(qn_tls_session *s, bool compressed)
         if (!clen || (size_t)clen + 8u != s->hs_len)
             return QN_TLS_RC_PROTO;
 
+        s->cert_compression_alg = algorithm;
         /* Sound compressed framing is still unauthenticated because decompression is unsupported. */
         s->cert_compressed = true;
-        return s->cfg.cert_strict ? QN_TLS_RC_UNSUPPORTED : QN_TLS_RC_OK;
+        return session_cert_strict(s) ? QN_TLS_RC_UNSUPPORTED : QN_TLS_RC_OK;
     }
     {
         const uint8_t *leaf;

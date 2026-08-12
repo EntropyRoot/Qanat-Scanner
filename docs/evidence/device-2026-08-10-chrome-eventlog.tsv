@@ -1,0 +1,4 @@
+# seed=18314240774591375239 operator=cellular/25.177.local sni=www.cloudflare.com fp=0 flow=0 idle=5000
+104.17.65.230	stable-after-marker	none	0	0	0x0304	0x1301	116616	198783	209636	204	0	5000	FRA	held	-	-
+104.18.126.178	stable-after-marker	none	0	0	0x0304	0x1301	121645	202042	198591	205	0	5000	FRA	held	-	-
+104.27.33.196	stable-after-marker	none	0	0	0x0304	0x1301	100997	190731	225689	203	0	5000	FRA	held	-	-

@@ -22,6 +22,9 @@
 #define FRAME_MS      33
 #define POLL_BUDGET   8192
 #define ARENA_BYTES   (48u << 20)
+#define PLAN_MIN_W    48
+#define PLAN_MIN_H    12
+#define PLAN_WIDE_W   72
 
 typedef enum { BG_NONE = 0, BG_NETINFO, BG_ICMP, BG_CF_VERIFY } bg_kind;
 
@@ -83,38 +86,6 @@ static void status(qn_app *a, const char *fmt, ...)
     va_end(ap);
 }
 
-static uint32_t verdict_color(const cf_record *record)
-{
-    const qn_theme *t = qn_theme_get();
-    qn_classification classification = qn_cf_record_classification(record);
-
-    if (classification.terminal_outcome != QN_TERM_SUCCESS) {
-        switch (classification.terminal_outcome) {
-        case QN_TERM_LOCAL_ERROR:
-        case QN_TERM_PROTOCOL_INVALID:
-        case QN_TERM_INTERFERENCE:
-            return t->bad;
-        case QN_TERM_NONE:
-            return t->faint;
-        default:
-            return t->warn;
-        }
-    }
-    switch (classification.highest_rung_reached) {
-    case QN_RUNG_STABLE:
-    case QN_RUNG_FLOWING:
-    case QN_RUNG_EDGE:
-        return t->good;
-    case QN_RUNG_TLS:
-    case QN_RUNG_HTTP:
-        return t->info;
-    case QN_RUNG_TCP:
-        return t->warn;
-    default:
-        return t->faint;
-    }
-}
-
 static bool cf_verifying(const qn_app *a)
 {
     return atomic_load_explicit(&a->bg_busy, memory_order_acquire) &&
@@ -162,6 +133,8 @@ static void *bg_main(void *arg)
                                      : qn_verify_run_outcome(
                                            (qn_verify_state)a->cf.verify_state);
 
+        if (ok && a->cfg->scan_plan.tunnel_enabled)
+            outcome = qn_run_outcome_worst(outcome, cf_scan_tunnel(&a->cf));
         cf_scan_finish(&a->cf);
         if (atomic_load_explicit(&a->bg_cancel, memory_order_acquire))
             outcome = QN_RUN_CANCELLED;
@@ -396,9 +369,12 @@ static bool prepare_cf_scan(qn_app *a)
     a->plan_confirm_pending = true;
     a->plan_request_changed = false;
     a->view = QN_VIEW_PLAN;
-    status(a, a->cfg->scan_plan.exact_full
-                  ? "full range plan ready; press Enter again to confirm all addresses"
-                  : "resource plan ready; press Enter again to start");
+    if (a->cfg->scan_plan.tunnel_enabled)
+        status(a, "real tunnel traffic to www.cloudflare.com:443; Enter confirms");
+    else
+        status(a, a->cfg->scan_plan.exact_full
+                      ? "full range plan ready; press Enter again to confirm all addresses"
+                      : "resource plan ready; press Enter again to start");
     return true;
 }
 
@@ -415,6 +391,8 @@ static bool launch_cf_scan(qn_app *a)
         return false;
     }
     a->engine_ready = true;
+    if (a->cfg->scan_plan.tunnel_enabled)
+        a->cfg->tunnel_confirmed = true;
     a->cf_launched = true;
     a->plan_confirm_pending = false;
     a->t_start_ms = qn_now_ms();
@@ -637,16 +615,23 @@ static void draw_footer(qn_app *a)
 
     x = 1;
     if (a->view == QN_VIEW_PLAN) {
-        x += qn_text(s, x, y, "arrows", t->accent, t->head_bg, QN_ATTR_BOLD);
-        x += qn_text(s, x, y, " choose  ", t->dim, t->head_bg, 0);
-        x += qn_text(s, x, y, "type", t->accent, t->head_bg, QN_ATTR_BOLD);
-        x += qn_text(s, x, y, " custom  ", t->dim, t->head_bg, 0);
-        x += qn_text(s, x, y, "enter", t->accent, t->head_bg, QN_ATTR_BOLD);
-        x += qn_text(s, x, y, " edit/review  ", t->dim, t->head_bg, 0);
-        x += qn_text(s, x, y, "w/r", t->accent, t->head_bg, QN_ATTR_BOLD);
-        x += qn_text(s, x, y, " save/load  ", t->dim, t->head_bg, 0);
-        x += qn_text(s, x, y, "tab", t->accent, t->head_bg, QN_ATTR_BOLD);
-        x += qn_text(s, x, y, " view", t->dim, t->head_bg, 0);
+        if (a->plan_confirm_pending) {
+            x += qn_text(s, x, y, "enter", t->good, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " confirm start  ", t->dim, t->head_bg, 0);
+            x += qn_text(s, x, y, "esc", t->warn, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " cancel  ", t->dim, t->head_bg, 0);
+            x += qn_text(s, x, y, "q", t->accent, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " quit", t->dim, t->head_bg, 0);
+        } else {
+            x += qn_text(s, x, y, "arrows", t->accent, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " choose  ", t->dim, t->head_bg, 0);
+            x += qn_text(s, x, y, "type", t->accent, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " custom  ", t->dim, t->head_bg, 0);
+            x += qn_text(s, x, y, "enter", t->accent, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " edit/review  ", t->dim, t->head_bg, 0);
+            x += qn_text(s, x, y, "w/r", t->accent, t->head_bg, QN_ATTR_BOLD);
+            x += qn_text(s, x, y, " save/load", t->dim, t->head_bg, 0);
+        }
     } else {
         x += qn_text(s, x, y, "1-7", t->accent, t->head_bg, QN_ATTR_BOLD);
         x += qn_text(s, x, y, " view  ", t->dim, t->head_bg, 0);
@@ -1038,6 +1023,11 @@ static void draw_plan_summary(qn_app *a, qn_rect panel)
     qn_kv(screen, panel.x + 2, y++, width, "candidate memory", value, theme->dim);
     format_memory(plan->estimated_verifier_bytes, value, sizeof value);
     qn_kv(screen, panel.x + 2, y++, width, "verifier memory", value, theme->dim);
+    if (plan->tunnel_enabled) {
+        format_memory(plan->estimated_tunnel_bytes, value, sizeof value);
+        qn_kv(screen, panel.x + 2, y++, width, "tunnel memory", value,
+              theme->dim);
+    }
     format_memory(plan->estimated_working_bytes, value, sizeof value);
     qn_kv(screen, panel.x + 2, y++, width, "range / working memory", value, theme->dim);
     format_memory(plan->estimated_total_bytes, value, sizeof value);
@@ -1064,17 +1054,99 @@ static void draw_plan_summary(qn_app *a, qn_rect panel)
                  theme->panel, QN_ATTR_BOLD);
 }
 
+static void draw_plan_summary_compact(qn_app *a, qn_rect panel)
+{
+    const qn_theme *theme = qn_theme_get();
+    const qn_scan_plan *plan = &a->cfg->scan_plan;
+    char first[32], second[32], third[32], value[112];
+    int y = panel.y + 1;
+    int width = panel.w - 4;
+
+    if (!a->cfg->scan_plan_valid || !a->cf_prepared || a->plan_request_changed) {
+        qn_textn(&a->scr, panel.x + 2, y++, "No effective plan yet.", width,
+                 theme->warn, theme->panel, QN_ATTR_BOLD);
+        qn_textn(&a->scr, panel.x + 2, y,
+                 "Review validates resources before any probe.", width,
+                 theme->dim, theme->panel, 0);
+        return;
+    }
+
+    (void)snprintf(value, sizeof value, "%s / %s",
+                   qn_scan_mode_str(plan->mode), qn_selection_str(plan->selection));
+    qn_kv(&a->scr, panel.x + 2, y++, width, "mode / selection", value, theme->accent);
+    qn_fmt_count(plan->planned_addresses, first, sizeof first);
+    qn_fmt_count(plan->total_addresses, second, sizeof second);
+    if (plan->mode == QN_SCAN_REACHABLE) {
+        qn_fmt_count(plan->reachable_target, third, sizeof third);
+        (void)snprintf(value, sizeof value, "%s / %s; target %s",
+                       first, second, third);
+    } else {
+        (void)snprintf(value, sizeof value, "%s / %s", first, second);
+    }
+    qn_kv(&a->scr, panel.x + 2, y++, width, "planned / unique", value,
+          theme->accent2);
+    qn_fmt_count(plan->duplicate_addresses, first, sizeof first);
+    (void)snprintf(value, sizeof value, "%u / %u; overlap %s",
+                   plan->input_prefixes, plan->normalized_prefixes, first);
+    qn_kv(&a->scr, panel.x + 2, y++, width, "prefixes in / normalized", value,
+          theme->fg);
+    qn_fmt_count(plan->candidate_capacity, first, sizeof first);
+    qn_fmt_count(plan->finalist_limit, second, sizeof second);
+    qn_fmt_count(plan->output_limit, third, sizeof third);
+    (void)snprintf(value, sizeof value, "%s / %s / %s", first, second, third);
+    qn_kv(&a->scr, panel.x + 2, y++, width, "candidate / finalist / output",
+          value, theme->fg);
+    (void)snprintf(value, sizeof value, "%u / %u / %u; batch %u",
+                   plan->scan_concurrency, plan->verify_concurrency,
+                   plan->stability_concurrency, plan->verification_batch_size);
+    qn_kv(&a->scr, panel.x + 2, y++, width, "scan / verify / hold", value,
+          theme->info);
+    if (plan->tunnel_enabled) {
+        (void)snprintf(value, sizeof value, "%" PRIu64 " / %u / %u",
+                       plan->tunnel_target, plan->tunnel_concurrency,
+                       plan->tunnel_attempts);
+        qn_kv(&a->scr, panel.x + 2, y++, width,
+              "tunnel target / workers / tries", value, theme->info);
+        qn_kv(&a->scr, panel.x + 2, y++, width, "tunnel destination",
+              "www.cloudflare.com:443", theme->warn);
+    }
+    format_memory(plan->estimated_total_bytes, first, sizeof first);
+    format_memory(plan->memory_budget_bytes, second, sizeof second);
+    (void)snprintf(value, sizeof value, "%s / %s", first, second);
+    qn_kv(&a->scr, panel.x + 2, y++, width, "memory total / budget", value,
+          theme->accent);
+    format_memory(plan->estimated_candidate_bytes, first, sizeof first);
+    format_memory(plan->estimated_verifier_bytes, second, sizeof second);
+    format_memory(plan->estimated_working_bytes, third, sizeof third);
+    (void)snprintf(value, sizeof value, "%s / %s / %s", first, second, third);
+    qn_kv(&a->scr, panel.x + 2, y++, width, "candidate / verify / working",
+          value, theme->dim);
+    (void)snprintf(value, sizeof value, "%" PRIu64 " / %" PRIu64,
+                   plan->estimated_fds, plan->fd_limit);
+    qn_kv(&a->scr, panel.x + 2, y++, width, "file descriptors", value,
+          theme->dim);
+    qn_textn(&a->scr, panel.x + 2, y++,
+             plan->exact_full ? "Complete loaded range set"
+                              : "Best observed among scanned addresses",
+             width, plan->exact_full ? theme->good : theme->warn,
+             theme->panel, QN_ATTR_BOLD);
+    if (y < panel.y + panel.h - 1)
+        qn_textn(&a->scr, panel.x + 2, y,
+                 "Enter confirms start; Esc cancels without probing.", width,
+                 theme->good, theme->panel, QN_ATTR_BOLD);
+}
+
 static void draw_plan(qn_app *a, qn_rect r)
 {
     const qn_theme *theme = qn_theme_get();
     qn_rect fields, summary;
     char title[32];
 
-    if (r.w < 72 || r.h < 14) {
+    if (r.w < PLAN_MIN_W || r.h < PLAN_MIN_H) {
         qn_box(&a->scr, r, "Scan Plan", true);
         qn_printf(&a->scr, r.x + 2, r.y + 2, theme->warn, theme->panel,
-                  QN_ATTR_BOLD, "Terminal is %dx%d; Scan Plan needs at least 72x14.",
-                  r.w, r.h);
+                  QN_ATTR_BOLD, "Terminal is %dx%d; Scan Plan needs at least %dx%d.",
+                  r.w, r.h, PLAN_MIN_W, PLAN_MIN_H);
         qn_textn(&a->scr, r.x + 2, r.y + 4,
                  "Resize the terminal; values and validation are preserved.",
                  r.w - 4, theme->dim, theme->panel, 0);
@@ -1082,6 +1154,16 @@ static void draw_plan(qn_app *a, qn_rect r)
     }
     (void)snprintf(title, sizeof title, "Scan Plan%s",
                    a->plan_editor.dirty ? " *" : "");
+    if (r.w < PLAN_WIDE_W) {
+        if (a->plan_confirm_pending) {
+            qn_box(&a->scr, r, "Resource Plan - Confirm", true);
+            draw_plan_summary_compact(a, r);
+        } else {
+            qn_box(&a->scr, r, title, true);
+            draw_plan_fields(a, r);
+        }
+        return;
+    }
     fields = (qn_rect){ r.x, r.y, r.w * 55 / 100, r.h };
     summary = (qn_rect){ fields.x + fields.w, r.y, r.w - fields.w, r.h };
     qn_box(&a->scr, fields, title, true);
@@ -1122,14 +1204,33 @@ static void draw_cf(qn_app *a, qn_rect r)
     const cf_record *records = cf_display_records(a, &nrecords);
     char            rtt[24], jit[24];
 
-    draw_table_head(a, r, "  #  ADDRESS           E STATE       MEDIAN  RTT DELTA   LOSS  COLO  SCORE");
+    draw_table_head(a, r, "  #  ADDRESS           E TUNNEL          MEDIAN  LOSS COLO SCORE");
     if (cf_verifying(a)) {
         size_t done  = atomic_load_explicit(&a->verify_done, memory_order_acquire);
         size_t total = atomic_load_explicit(&a->verify_total, memory_order_acquire);
         char   progress[128];
 
-        snprintf(progress, sizeof progress,
-                 "full TLS + HTTPS verification: %zu / %zu finalists  (x cancels)", done, total);
+        if (atomic_load_explicit(&a->cf.tunnel_active,
+                                 memory_order_acquire) ||
+            atomic_load_explicit(&a->cf.tunnel_queued,
+                                 memory_order_acquire)) {
+            uint32_t queued = atomic_load_explicit(&a->cf.tunnel_queued,
+                                                    memory_order_acquire);
+            uint32_t passed = atomic_load_explicit(&a->cf.tunnel_passed,
+                                                    memory_order_acquire);
+            uint32_t failed = atomic_load_explicit(&a->cf.tunnel_failed,
+                                                    memory_order_acquire);
+            uint32_t skipped = atomic_load_explicit(&a->cf.tunnel_skipped,
+                                                     memory_order_acquire);
+
+            snprintf(progress, sizeof progress,
+                     "tunnel q/p/f/s %u/%u/%u/%u  (x cancels)", queued,
+                     passed, failed, skipped);
+        } else {
+            snprintf(progress, sizeof progress,
+                     "full TLS + HTTPS verification: %zu / %zu  (x cancels)",
+                     done, total);
+        }
         qn_textn(s, r.x + QN_MAX(r.w - (int)strlen(progress) - 2, 2), r.y, progress,
                  r.w - 4, t->info, t->head_bg, QN_ATTR_BOLD);
     }
@@ -1157,14 +1258,18 @@ static void draw_cf(qn_app *a, qn_rect r)
         qn_text(s, r.x + 23, y, rec->verified ? "V" : "P",
                 rec->verified ? t->good : t->warn, bg, QN_ATTR_BOLD);
         qn_textn(s, r.x + 25, y,
-                 qn_classification_str(qn_cf_record_classification(rec)), 10,
-                 verdict_color(rec), bg,
-                 QN_ATTR_BOLD);
-        qn_printf(s, r.x + 36, y, t->fg, bg, 0, "%9s", rtt);
-        qn_printf(s, r.x + 46, y, t->dim, bg, 0, "%9s", jit);
-        qn_printf(s, r.x + 56, y, rec->loss_pct ? t->warn : t->faint, bg, 0, "%4u%%", rec->loss_pct);
-        qn_textn(s, r.x + 63, y, rec->colo[0] ? rec->colo : "-", 4, t->info, bg, 0);
-        qn_printf(s, r.x + 69, y, rec->score ? t->good : t->faint, bg, QN_ATTR_BOLD, "%5u",
+                 qn_tunnel_state_str((qn_tunnel_state)rec->tunnel_state), 15,
+                 rec->tunnel_state == QN_TUNNEL_PASSED ? t->good
+                 : qn_tunnel_state_failed((qn_tunnel_state)rec->tunnel_state)
+                     ? t->bad : t->faint,
+                 bg, QN_ATTR_BOLD);
+        qn_printf(s, r.x + 41, y, t->fg, bg, 0, "%9s", rtt);
+        qn_printf(s, r.x + 51, y, rec->loss_pct ? t->warn : t->faint, bg, 0,
+                  "%4u%%", rec->loss_pct);
+        qn_textn(s, r.x + 57, y, rec->colo[0] ? rec->colo : "-", 4,
+                 t->info, bg, 0);
+        qn_printf(s, r.x + 62, y, rec->score ? t->good : t->faint, bg,
+                  QN_ATTR_BOLD, "%5u",
                   rec->score);
     }
 

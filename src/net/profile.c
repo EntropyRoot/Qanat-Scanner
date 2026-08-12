@@ -7,75 +7,103 @@
 
 #define H2_HEADER_TABLE_SIZE 0x1u
 #define H2_ENABLE_PUSH       0x2u
+#define H2_MAX_CONCURRENT    0x3u
 #define H2_INITIAL_WINDOW    0x4u
 #define H2_MAX_FRAME_SIZE    0x5u
 #define H2_MAX_HEADER_LIST   0x6u
+#define H2_ENABLE_CONNECT    0x8u
+#define H2_NO_RFC7540_PRI    0x9u
 
 static const qn_client_profile PROFILES[] = {
     {
         QN_TLS_FP_CHROME,
-        { { { H2_HEADER_TABLE_SIZE, 0u },
+        { { { H2_HEADER_TABLE_SIZE, 65536u },
               { H2_ENABLE_PUSH, 0u },
-              { H2_INITIAL_WINDOW, 16u << 20 },
-              { H2_MAX_HEADER_LIST, 8192u } },
-          4u, 16u << 20 },
-        { "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
-          "*/*", "identity",
+              { H2_INITIAL_WINDOW, 6u << 20 },
+              { H2_MAX_HEADER_LIST, 256u << 10 } },
+          4u, 15u << 20 },
+        { "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+          "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "gzip, deflate, br, zstd", "fa,en-US;q=0.9,en;q=0.8,de;q=0.7",
+          "cross-site",
+          "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", "
+          "\"Chromium\";v=\"151\"",
           { QN_PSEUDO_METHOD, QN_PSEUDO_AUTHORITY,
             QN_PSEUDO_SCHEME, QN_PSEUDO_PATH },
-          { QN_HEADER_USER_AGENT, QN_HEADER_ACCEPT,
-            QN_HEADER_ACCEPT_ENCODING } },
-        "chrome-android-126", "Chrome", "Android", "126"
+          { QN_HEADER_CONNECTION, QN_HEADER_SEC_CH_UA, QN_HEADER_SEC_CH_UA_MOBILE,
+            QN_HEADER_SEC_CH_UA_PLATFORM, QN_HEADER_UPGRADE_INSECURE,
+            QN_HEADER_USER_AGENT, QN_HEADER_ACCEPT, QN_HEADER_SEC_FETCH_SITE,
+            QN_HEADER_SEC_FETCH_MODE, QN_HEADER_SEC_FETCH_DEST,
+            QN_HEADER_ACCEPT_ENCODING, QN_HEADER_ACCEPT_LANGUAGE }, 12u },
+        "chrome-android-151", "Chrome", "Android", "151"
     },
     {
         QN_TLS_FP_FIREFOX,
-        { { { H2_HEADER_TABLE_SIZE, 0u },
-              { H2_INITIAL_WINDOW, 131072u },
-              { H2_MAX_FRAME_SIZE, 16384u },
+        { { { H2_HEADER_TABLE_SIZE, 65536u },
               { H2_ENABLE_PUSH, 0u },
-              { H2_MAX_HEADER_LIST, 8192u } },
-          5u, 16u << 20 },
-        { "Mozilla/5.0 (Android 14; Mobile; rv:127.0) Gecko/127.0 "
-          "Firefox/127.0",
-          "*/*", "identity",
+              { H2_INITIAL_WINDOW, 131072u },
+              { H2_MAX_FRAME_SIZE, 16384u } },
+          4u, 12u << 20 },
+        { "Mozilla/5.0 (Android 13; Mobile; rv:153.0) Gecko/153.0 Firefox/153.0",
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "gzip, deflate, br, zstd", "fa-IR", "none", NULL,
           { QN_PSEUDO_METHOD, QN_PSEUDO_PATH,
             QN_PSEUDO_AUTHORITY, QN_PSEUDO_SCHEME },
-          { QN_HEADER_ACCEPT, QN_HEADER_ACCEPT_ENCODING,
-            QN_HEADER_USER_AGENT } },
-        "firefox-android-127", "Firefox", "Android", "127"
+          { QN_HEADER_USER_AGENT, QN_HEADER_ACCEPT, QN_HEADER_ACCEPT_LANGUAGE,
+            QN_HEADER_ACCEPT_ENCODING, QN_HEADER_CONNECTION,
+            QN_HEADER_UPGRADE_INSECURE,
+            QN_HEADER_SEC_FETCH_DEST, QN_HEADER_SEC_FETCH_MODE,
+            QN_HEADER_SEC_FETCH_SITE, QN_HEADER_SEC_FETCH_USER,
+            QN_HEADER_PRIORITY }, 11u },
+        "firefox-android-153", "Firefox", "Android", "153"
     },
     {
         QN_TLS_FP_SAFARI,
-        { { { H2_ENABLE_PUSH, 0u },
-              { H2_HEADER_TABLE_SIZE, 0u },
-              { H2_INITIAL_WINDOW, 65535u },
-              { H2_MAX_HEADER_LIST, 8192u } },
-          4u, 16u << 20 },
-        { "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-          "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+        { { { H2_HEADER_TABLE_SIZE, 4096u },
+              { H2_ENABLE_PUSH, 0u },
+              { H2_MAX_CONCURRENT, 100u },
+              { H2_INITIAL_WINDOW, 2u << 20 },
+              { H2_ENABLE_CONNECT, 1u },
+              { H2_NO_RFC7540_PRI, 1u } },
+          6u, 10u << 20 },
+        { "Mozilla/5.0 (iPhone; CPU iPhone OS 26_3 like Mac OS X) "
+          "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 "
           "Mobile/15E148 Safari/604.1",
-          "*/*", "identity",
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "gzip, deflate, br", "en-US,en;q=0.9", "none", NULL,
           { QN_PSEUDO_METHOD, QN_PSEUDO_SCHEME,
             QN_PSEUDO_PATH, QN_PSEUDO_AUTHORITY },
-          { QN_HEADER_ACCEPT_ENCODING, QN_HEADER_ACCEPT,
-            QN_HEADER_USER_AGENT } },
-        "safari-ios-17", "Safari", "iOS", "17"
+          { QN_HEADER_USER_AGENT, QN_HEADER_ACCEPT, QN_HEADER_ACCEPT_LANGUAGE,
+            QN_HEADER_ACCEPT_ENCODING, QN_HEADER_UPGRADE_INSECURE,
+            QN_HEADER_SEC_FETCH_DEST, QN_HEADER_SEC_FETCH_MODE,
+            QN_HEADER_SEC_FETCH_SITE, QN_HEADER_SEC_FETCH_USER,
+            QN_HEADER_PRIORITY, QN_HEADER_CONNECTION }, 11u },
+        "safari-ios-26", "Safari", "iOS", "26.3"
     },
     {
         QN_TLS_FP_RANDOM,
-        { { { H2_HEADER_TABLE_SIZE, 0u },
+        { { { H2_HEADER_TABLE_SIZE, 65536u },
               { H2_ENABLE_PUSH, 0u },
-              { H2_INITIAL_WINDOW, 16u << 20 },
-              { H2_MAX_HEADER_LIST, 8192u } },
-          4u, 16u << 20 },
-        { "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
-          "*/*", "identity",
+              { H2_INITIAL_WINDOW, 6u << 20 },
+              { H2_MAX_HEADER_LIST, 256u << 10 } },
+          4u, 15u << 20 },
+        { "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+          "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "gzip, deflate, br, zstd", "fa,en-US;q=0.9,en;q=0.8,de;q=0.7",
+          "cross-site",
+          "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", "
+          "\"Chromium\";v=\"151\"",
           { QN_PSEUDO_METHOD, QN_PSEUDO_AUTHORITY,
             QN_PSEUDO_SCHEME, QN_PSEUDO_PATH },
-          { QN_HEADER_USER_AGENT, QN_HEADER_ACCEPT,
-            QN_HEADER_ACCEPT_ENCODING } },
+          { QN_HEADER_CONNECTION, QN_HEADER_SEC_CH_UA, QN_HEADER_SEC_CH_UA_MOBILE,
+            QN_HEADER_SEC_CH_UA_PLATFORM, QN_HEADER_UPGRADE_INSECURE,
+            QN_HEADER_USER_AGENT, QN_HEADER_ACCEPT, QN_HEADER_SEC_FETCH_SITE,
+            QN_HEADER_SEC_FETCH_MODE, QN_HEADER_SEC_FETCH_DEST,
+            QN_HEADER_ACCEPT_ENCODING, QN_HEADER_ACCEPT_LANGUAGE }, 12u },
         "random", "Randomized", "dynamic", "seeded"
     }
 };
@@ -177,7 +205,8 @@ bool qn_profile_instance_init(qn_profile_instance *instance, qn_tls_fp requested
                              QN_PROFILE_MAX_H2_SETTINGS, &instance->h2_settings_n,
                              &instance->h2_connection_window) ||
         !qn_profile_http_shape(profile, instance->seed, instance->h2_pseudo_order,
-                               instance->http1_header_order)) {
+                               instance->http1_header_order,
+                               &instance->http1_header_order_n)) {
         memset(instance, 0, sizeof *instance);
         return false;
     }
@@ -208,6 +237,12 @@ bool qn_client_profile_parse(const char *name, qn_tls_fp *profile)
     else if (!strcmp(name, "firefox"))
         *profile = QN_TLS_FP_FIREFOX;
     else if (!strcmp(name, "safari"))
+        *profile = QN_TLS_FP_SAFARI;
+    else if (!strcmp(name, "chrome-android-126"))
+        *profile = QN_TLS_FP_CHROME;
+    else if (!strcmp(name, "firefox-android-127"))
+        *profile = QN_TLS_FP_FIREFOX;
+    else if (!strcmp(name, "safari-ios-17"))
         *profile = QN_TLS_FP_SAFARI;
     else
         return false;
@@ -249,17 +284,21 @@ bool qn_profile_h2_shape(const qn_client_profile *profile, uint64_t seed,
 }
 
 bool qn_profile_http_shape(const qn_client_profile *profile, uint64_t seed,
-                           uint8_t pseudo_order[4], uint8_t header_order[3])
+                           uint8_t pseudo_order[4],
+                           uint8_t header_order[QN_PROFILE_MAX_HEADERS],
+                           size_t *header_order_n)
 {
-    if (!profile || !pseudo_order || !header_order)
+    if (!profile || !pseudo_order || !header_order || !header_order_n ||
+        profile->http.nheaders > QN_PROFILE_MAX_HEADERS)
         return false;
     memcpy(pseudo_order, profile->http.pseudo_order, 4u);
-    memcpy(header_order, profile->http.header_order, 3u);
+    memcpy(header_order, profile->http.header_order, profile->http.nheaders);
+    *header_order_n = profile->http.nheaders;
     if (profile->tls == QN_TLS_FP_RANDOM) {
         uint64_t state = seed ^ UINT64_C(0x48322D4845414445);
 
         shuffle_u8(pseudo_order, 4u, &state);
-        shuffle_u8(header_order, 3u, &state);
+        shuffle_u8(header_order, *header_order_n, &state);
     }
     return true;
 }
@@ -288,6 +327,9 @@ static void request_header(request_writer *writer,
                            uint8_t header)
 {
     switch ((qn_regular_header)header) {
+    case QN_HEADER_CONNECTION:
+        request_put(writer, "Connection: keep-alive");
+        break;
     case QN_HEADER_USER_AGENT:
         request_put(writer, "User-Agent: ");
         request_put(writer, profile->user_agent);
@@ -299,6 +341,42 @@ static void request_header(request_writer *writer,
     case QN_HEADER_ACCEPT_ENCODING:
         request_put(writer, "Accept-Encoding: ");
         request_put(writer, profile->accept_encoding);
+        break;
+    case QN_HEADER_ACCEPT_LANGUAGE:
+        request_put(writer, "Accept-Language: ");
+        request_put(writer, profile->accept_language);
+        break;
+    case QN_HEADER_UPGRADE_INSECURE:
+        request_put(writer, "Upgrade-Insecure-Requests: 1");
+        break;
+    case QN_HEADER_SEC_FETCH_DEST:
+        request_put(writer, "Sec-Fetch-Dest: document");
+        break;
+    case QN_HEADER_SEC_FETCH_MODE:
+        request_put(writer, "Sec-Fetch-Mode: navigate");
+        break;
+    case QN_HEADER_SEC_FETCH_SITE:
+        request_put(writer, "Sec-Fetch-Site: ");
+        request_put(writer, profile->sec_fetch_site);
+        break;
+    case QN_HEADER_SEC_FETCH_USER:
+        request_put(writer, "Sec-Fetch-User: ?1");
+        break;
+    case QN_HEADER_SEC_CH_UA:
+        request_put(writer, "Sec-CH-UA: ");
+        request_put(writer, profile->sec_ch_ua);
+        break;
+    case QN_HEADER_SEC_CH_UA_MOBILE:
+        request_put(writer, "Sec-CH-UA-Mobile: ?1");
+        break;
+    case QN_HEADER_SEC_CH_UA_PLATFORM:
+        request_put(writer, "Sec-CH-UA-Platform: \"Android\"");
+        break;
+    case QN_HEADER_PRIORITY:
+        request_put(writer, "Priority: u=0, i");
+        break;
+    case QN_HEADER_TE:
+        request_put(writer, "TE: trailers");
         break;
     default:
         writer->failed = true;
@@ -313,12 +391,13 @@ int qn_profile_http1_get(const qn_client_profile *profile, uint64_t seed,
 {
     request_writer writer = { out, cap, 0u, false };
     uint8_t pseudo_order[4];
-    uint8_t order[3];
+    uint8_t order[QN_PROFILE_MAX_HEADERS];
+    size_t order_n;
 
     if (!profile || !out || !cap || !qn_valid_field(host, 253u) ||
         !qn_valid_field(path, 1024u))
         return -1;
-    if (!qn_profile_http_shape(profile, seed, pseudo_order, order))
+    if (!qn_profile_http_shape(profile, seed, pseudo_order, order, &order_n))
         return -1;
 
     request_put(&writer, "GET ");
@@ -326,9 +405,9 @@ int qn_profile_http1_get(const qn_client_profile *profile, uint64_t seed,
     request_put(&writer, " HTTP/1.1\r\nHost: ");
     request_put(&writer, host);
     request_put(&writer, "\r\n");
-    for (size_t i = 0; i < sizeof order; i++)
+    for (size_t i = 0; i < order_n; i++)
         request_header(&writer, &profile->http, order[i]);
-    request_put(&writer, "Connection: keep-alive\r\n\r\n");
+    request_put(&writer, "\r\n");
     if (writer.failed || writer.n >= cap || writer.n > (size_t)INT32_MAX)
         return -1;
     out[writer.n] = 0u;
@@ -350,10 +429,10 @@ int qn_profile_instance_http1_get(const qn_profile_instance *instance,
     request_put(&writer, " HTTP/1.1\r\nHost: ");
     request_put(&writer, host);
     request_put(&writer, "\r\n");
-    for (size_t i = 0; i < QN_ARRAY_LEN(instance->http1_header_order); i++)
+    for (size_t i = 0; i < instance->http1_header_order_n; i++)
         request_header(&writer, &instance->profile->http,
                        instance->http1_header_order[i]);
-    request_put(&writer, "Connection: keep-alive\r\n\r\n");
+    request_put(&writer, "\r\n");
     if (writer.failed || writer.n >= cap || writer.n > (size_t)INT32_MAX)
         return -1;
     out[writer.n] = 0u;

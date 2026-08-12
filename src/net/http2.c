@@ -128,6 +128,19 @@ static bool literal_indexed_name(uint32_t name, const char *value,
     return true;
 }
 
+static bool literal_new_name(const char *name, const char *value,
+                             uint8_t *out, size_t cap, size_t *n)
+{
+    size_t a, b;
+
+    if (!cap || !hpack_string(name, out + 1u, cap - 1u, &a) ||
+        !hpack_string(value, out + 1u + a, cap - 1u - a, &b))
+        return false;
+    out[0] = 0u;
+    *n = 1u + a + b;
+    return true;
+}
+
 void qn_h2_init(qn_h2 *h)
 {
     if (h)
@@ -236,19 +249,47 @@ static bool emit_regular(const qn_http_header_profile *profile, uint8_t field,
                          uint8_t *out, size_t cap, size_t *n)
 {
     switch ((qn_regular_header)field) {
+    case QN_HEADER_CONNECTION:
+        *n = 0u;
+        return true;
     case QN_HEADER_USER_AGENT:
         return literal_indexed_name(58u, profile->user_agent, out, cap, n);
     case QN_HEADER_ACCEPT:
         return literal_indexed_name(19u, profile->accept, out, cap, n);
     case QN_HEADER_ACCEPT_ENCODING:
         return literal_indexed_name(16u, profile->accept_encoding, out, cap, n);
+    case QN_HEADER_ACCEPT_LANGUAGE:
+        return literal_indexed_name(17u, profile->accept_language, out, cap, n);
+    case QN_HEADER_UPGRADE_INSECURE:
+        return literal_new_name("upgrade-insecure-requests", "1", out, cap, n);
+    case QN_HEADER_SEC_FETCH_DEST:
+        return literal_new_name("sec-fetch-dest", "document", out, cap, n);
+    case QN_HEADER_SEC_FETCH_MODE:
+        return literal_new_name("sec-fetch-mode", "navigate", out, cap, n);
+    case QN_HEADER_SEC_FETCH_SITE:
+        return literal_new_name("sec-fetch-site", profile->sec_fetch_site,
+                                out, cap, n);
+    case QN_HEADER_SEC_FETCH_USER:
+        return literal_new_name("sec-fetch-user", "?1", out, cap, n);
+    case QN_HEADER_SEC_CH_UA:
+        return literal_new_name("sec-ch-ua", profile->sec_ch_ua, out, cap, n);
+    case QN_HEADER_SEC_CH_UA_MOBILE:
+        return literal_new_name("sec-ch-ua-mobile", "?1", out, cap, n);
+    case QN_HEADER_SEC_CH_UA_PLATFORM:
+        return literal_new_name("sec-ch-ua-platform", "\"Android\"", out, cap, n);
+    case QN_HEADER_PRIORITY:
+        return literal_new_name("priority", "u=0, i", out, cap, n);
+    case QN_HEADER_TE:
+        return literal_indexed_name(59u, "trailers", out, cap, n);
     default:
         return false;
     }
 }
 
 static int get_shaped(const qn_client_profile *profile,
-                      const uint8_t pseudo_order[4], const uint8_t header_order[3],
+                      const uint8_t pseudo_order[4],
+                      const uint8_t header_order[QN_PROFILE_MAX_HEADERS],
+                      size_t header_order_n,
                       uint32_t stream_id, const char *authority,
                       const char *path, uint8_t *out, size_t cap)
 {
@@ -265,7 +306,7 @@ static int get_shaped(const qn_client_profile *profile,
             return -1;
         off += n;
     }
-    for (size_t i = 0; i < 3u; i++) {
+    for (size_t i = 0; i < header_order_n; i++) {
         if (!emit_regular(&profile->http, header_order[i],
                           block + off, sizeof block - off, &n))
             return -1;
@@ -280,12 +321,14 @@ int qn_h2_get_profile(const qn_client_profile *profile, uint64_t seed,
                       uint32_t stream_id, const char *authority,
                       const char *path, uint8_t *out, size_t cap)
 {
-    uint8_t pseudo_order[4], header_order[3];
+    uint8_t pseudo_order[4], header_order[QN_PROFILE_MAX_HEADERS];
+    size_t header_order_n;
 
-    if (!profile || !qn_profile_http_shape(profile, seed, pseudo_order, header_order))
+    if (!profile || !qn_profile_http_shape(profile, seed, pseudo_order,
+                                            header_order, &header_order_n))
         return -1;
-    return get_shaped(profile, pseudo_order, header_order, stream_id, authority,
-                      path, out, cap);
+    return get_shaped(profile, pseudo_order, header_order, header_order_n,
+                      stream_id, authority, path, out, cap);
 }
 
 int qn_h2_get_instance(const qn_profile_instance *instance, uint32_t stream_id,
@@ -296,8 +339,9 @@ int qn_h2_get_instance(const qn_profile_instance *instance, uint32_t stream_id,
         !instance->profile)
         return -1;
     return get_shaped(instance->profile, instance->h2_pseudo_order,
-                      instance->http1_header_order, stream_id, authority,
-                      path, out, cap);
+                      instance->http1_header_order,
+                      instance->http1_header_order_n, stream_id,
+                      authority, path, out, cap);
 }
 
 static bool pull_hpack_int(const uint8_t *p, size_t len, size_t *off,

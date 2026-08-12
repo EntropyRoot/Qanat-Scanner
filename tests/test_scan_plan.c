@@ -319,10 +319,46 @@ static void test_request_validation_catches_cross_field_errors(void)
     CHECK(strstr(error, "Reachable Target") != NULL);
 }
 
+static void test_tunnel_resource_contract(void)
+{
+    qn_scan_request request;
+    qn_scan_environment env = environment(100000u);
+    qn_scan_plan plan;
+
+    qn_scan_request_defaults(&request);
+    request.tunnel_enabled = true;
+    request.tunnel_target = 10u;
+    request.tunnel_concurrency = 4u;
+    request.tunnel_attempts = 2u;
+    env.verifier_fixed_bytes = 262144u;
+    CHECK(qn_scan_plan_resolve(&request, &env, &plan));
+    CHECK(plan.tunnel_target == 10u);
+    CHECK(plan.estimated_tunnel_bytes > 0u);
+    CHECK(plan.estimated_total_bytes == plan.estimated_candidate_bytes +
+                                        plan.estimated_working_bytes +
+                                        (plan.estimated_verifier_bytes >
+                                                 plan.estimated_tunnel_bytes
+                                             ? plan.estimated_verifier_bytes
+                                             : plan.estimated_tunnel_bytes));
+    env.fd_limit = 70u;
+    request.tunnel_concurrency = 3u;
+    CHECK(!qn_scan_plan_resolve(&request, &env, &plan));
+    CHECK(strstr(plan.error, "Tunnel Concurrency") != NULL);
+    request.tunnel_concurrency = 33u;
+    env.fd_limit = 4096u;
+    CHECK(!qn_scan_plan_resolve(&request, &env, &plan));
+    CHECK(strstr(plan.error, "1 to 32") != NULL);
+    request.tunnel_concurrency = 2u;
+    request.tunnel_attempts = 3u;
+    CHECK(!qn_scan_plan_resolve(&request, &env, &plan));
+    CHECK(strstr(plan.error, "1 to 2") != NULL);
+}
+
 static void test_settings_round_trip_and_rejects_corruption(void)
 {
     char directory[] = "qanat-plan-settings-XXXXXX";
     char path[256];
+    char legacy[256];
     char nested[256];
     char error[192];
     qn_scan_request saved, loaded, unchanged;
@@ -342,6 +378,40 @@ static void test_settings_round_trip_and_rejects_corruption(void)
     CHECK(qn_scan_settings_load(path, &loaded, error, sizeof error));
     CHECK(qn_scan_request_equal(&saved, &loaded));
 
+    CHECK(snprintf(legacy, sizeof legacy, "%s/nested/scan-plan-v1.conf",
+                   directory) > 0);
+    {
+        FILE *source = fopen(path, "r");
+        FILE *target = fopen(legacy, "w");
+        char *line = NULL;
+        size_t capacity = 0u;
+
+        CHECK(source != NULL);
+        CHECK(target != NULL);
+        if (source && target) {
+            while (getline(&line, &capacity, source) >= 0) {
+                if (!strncmp(line, "version=", 8u))
+                    CHECK(fputs("version=1\n", target) >= 0);
+                else if (strncmp(line, "tunnel_", 7u))
+                    CHECK(fputs(line, target) >= 0);
+            }
+        }
+        free(line);
+        if (source)
+            CHECK(fclose(source) == 0);
+        if (target)
+            CHECK(fclose(target) == 0);
+    }
+    saved.tunnel_enabled = true;
+    saved.tunnel_target = 7u;
+    loaded = saved;
+    CHECK(qn_scan_settings_load(legacy, &loaded, error, sizeof error));
+    CHECK(!loaded.tunnel_enabled);
+    CHECK(!loaded.tunnel_all);
+    CHECK(loaded.tunnel_target == 0u);
+    CHECK(loaded.tunnel_concurrency == 1u);
+    CHECK(loaded.tunnel_attempts == 2u);
+
     unchanged = loaded;
     saved.coverage_ppm = 99u;
     CHECK(!qn_scan_settings_save(path, &saved, error, sizeof error));
@@ -359,6 +429,7 @@ static void test_settings_round_trip_and_rejects_corruption(void)
     CHECK(qn_scan_request_equal(&unchanged, &loaded));
 
     CHECK(unlink(path) == 0);
+    CHECK(unlink(legacy) == 0);
     CHECK(snprintf(nested, sizeof nested, "%s/nested", directory) > 0);
     CHECK(rmdir(nested) == 0);
     CHECK(rmdir(directory) == 0);
@@ -377,6 +448,7 @@ int main(void)
     test_reachable_auto_does_not_conflate_candidate_capacity();
     test_presets_are_only_initial_values();
     test_request_validation_catches_cross_field_errors();
+    test_tunnel_resource_contract();
     test_settings_round_trip_and_rejects_corruption();
     if (failures) {
         fprintf(stderr, "scan plan tests: %d failure(s)\n", failures);

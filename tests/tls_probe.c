@@ -41,6 +41,16 @@ static bool write_all(int fd, const uint8_t *p, size_t n)
     return true;
 }
 
+static void dump_failed_handshake(const qn_tls_session *s)
+{
+    size_t i;
+
+    fprintf(stderr, "handshake-body[%u]:", (unsigned)s->hs_kept);
+    for (i = 0; i < s->hs_kept; i++)
+        fprintf(stderr, "%02x", s->hs[i]);
+    fputc('\n', stderr);
+}
+
 int main(int argc, char **argv)
 {
     static uint8_t inbuf[16384], outbuf[32768], appbuf[262144], hello[4096];
@@ -111,8 +121,11 @@ int main(int argc, char **argv)
             int                rl;
 
             shook = true;
-            printf("handshake: ok version=0x%04X suite=0x%04X ems=%d cn=%s issuer=%s\n", s.version, s.suite,
-                   (int)s.ems, s.peer_cn[0] ? s.peer_cn : "-",
+            printf("handshake: ok version=0x%04X suite=0x%04X group=0x%04X alpn=%s ems=%d cert=%u cert_comp=%u ech_retry=%d alps=%d cn=%s issuer=%s\n",
+                   s.version, s.suite, s.peer_group, s.alpn[0] ? s.alpn : "-", (int)s.ems,
+                   (unsigned)qn_tls_cert_status(&s), (unsigned)s.cert_compression_alg,
+                   (int)s.ech_retry_received, (int)s.alps_negotiated,
+                   s.peer_cn[0] ? s.peer_cn : "-",
                    s.peer_issuer[0] ? s.peer_issuer : "-");
 
             rl = snprintf(req, sizeof req, req_fmt, sni);
@@ -132,6 +145,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "handshake failed: %s (state=%u hs=%u suite=0x%04X alert=%u)\n",
                 qn_tls_rc_str(rc), s.st, s.hs_type, s.suite, s.alert_desc);
+        dump_failed_handshake(&s);
         return 1;
     }
 

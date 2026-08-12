@@ -2,18 +2,27 @@
 #define QANAT_TLS_H
 
 #include "qanat/crypto.h"
+#include "qanat/mlkem.h"
 
 /* A ciphertext record is at most 2^14 + 256 bytes, plus the 5-byte header. */
 #define QN_TLS_REC_MAX 16645
 
 /* Large handshake messages are hashed and dropped; only parsed ones are kept. */
-#define QN_TLS_HS_BUF 2048
+#define QN_TLS_HS_BUF 4096
 
 /* A certificate chain far larger than this is not a chain we need to believe. */
 #define QN_TLS_CERT_MAX (256u * 1024u)
 
 /* Matches QN_HELLO_MAX_SIGALGS; the offered list is kept to check the peer's. */
 #define QN_TLS_MAX_SIGALGS 24
+
+#define QN_GROUP_X25519_MLKEM768 0x11ECu
+#define QN_GROUP_X25519          0x001Du
+#define QN_GROUP_P256            0x0017u
+#define QN_HYBRID_CLIENT_SHARE_LEN 1216u
+#define QN_HYBRID_SERVER_SHARE_LEN 1120u
+#define QN_ECH_PAYLOAD_MAX          240u
+#define QN_TLS_ALPS_MAX             512u
 
 /* Cursor for the streaming Certificate framing check; see src/net/certscan.h. */
 typedef struct {
@@ -109,6 +118,16 @@ typedef struct {
 
     uint8_t x_sk[QN_X25519_LEN];
     uint8_t x_pk[QN_X25519_LEN];
+    uint8_t hybrid_x_sk[QN_X25519_LEN];
+    uint8_t hybrid_share[QN_HYBRID_CLIENT_SHARE_LEN];
+    uint8_t mlkem_sk[QN_MLKEM768_SECRET_LEN];
+    uint8_t p256_sk[QN_P256_SECRET_LEN];
+    uint8_t p256_pk[QN_P256_PUBLIC_LEN];
+    uint8_t ech_enc[QN_X25519_LEN];
+    uint8_t ech_payload[QN_ECH_PAYLOAD_MAX];
+    uint16_t ech_payload_len;
+    uint16_t ech_aead;
+    uint8_t ech_config_id;
     uint8_t client_random[32];
     uint8_t server_random[32];
     uint8_t session_id[32];
@@ -129,7 +148,9 @@ typedef struct {
 
     /* TLS 1.2 state: master secret, peer share, and whether EMS was agreed. */
     uint8_t tls12_master[48];
-    uint8_t peer_pub[QN_X25519_LEN];
+    uint8_t peer_pub[QN_P256_PUBLIC_LEN];
+    uint16_t peer_group;
+    uint8_t peer_pub_len;
     bool    have_peer;
     bool    ems;
 
@@ -162,12 +183,18 @@ typedef struct {
     uint64_t hello_grease_seed;
     uint16_t hrr_cookie_len;
     uint16_t hrr_suite;
+    uint16_t hrr_group;
     uint8_t  hrr_cookie[512];
     bool    cert_requested;
     bool    saw_certificate;
     bool    saw_cert_verify;
+    uint16_t cert_compression_alg; /* Algorithm carried by CompressedCertificate, or zero. */
     /* RFC 8879 framing was valid but the chain was never decompressed. */
     bool    cert_compressed;
+    bool    ech_retry_received;
+    bool    alps_negotiated;
+    uint16_t alps_len;
+    uint8_t alps[QN_TLS_ALPS_MAX];
 
     /* Protocol selected by the peer's ALPN extension (empty means none). */
     char alpn[16];

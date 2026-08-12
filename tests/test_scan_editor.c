@@ -115,11 +115,41 @@ static void test_navigation_and_review(void)
     CHECK(press(&editor, &request, QN_KEY_ESC, 0u, message) == QN_SCAN_EDIT_CANCELLED);
 }
 
+static void test_tunnel_fields(void)
+{
+    qn_scan_editor editor;
+    qn_scan_request request;
+    char message[192] = "";
+    char value[64];
+
+    qn_scan_request_defaults(&request);
+    qn_scan_editor_init(&editor);
+    editor.field = QN_SCAN_FIELD_TUNNEL_STAGE;
+    CHECK(press(&editor, &request, QN_KEY_RIGHT, 0u, message) ==
+          QN_SCAN_EDIT_CHANGED);
+    CHECK(request.tunnel_enabled && request.tunnel_target == 5u);
+    editor.field = QN_SCAN_FIELD_TUNNEL_TARGET;
+    type_text(&editor, &request, "10", message);
+    CHECK(press(&editor, &request, QN_KEY_ENTER, 0u, message) ==
+          QN_SCAN_EDIT_CHANGED);
+    CHECK(!request.tunnel_all && request.tunnel_target == 10u);
+    editor.field = QN_SCAN_FIELD_TUNNEL_CONCURRENCY;
+    type_text(&editor, &request, "33", message);
+    CHECK(press(&editor, &request, QN_KEY_ENTER, 0u, message) ==
+          QN_SCAN_EDIT_NONE);
+    CHECK(strstr(message, "1 to 32") != NULL);
+    (void)press(&editor, &request, QN_KEY_ESC, 0u, message);
+    CHECK(qn_scan_field_value(&editor, &request, QN_SCAN_FIELD_TUNNEL_STAGE,
+                              value, sizeof value) > 0);
+    CHECK(!strcmp(value, "Enabled"));
+}
+
 int main(void)
 {
     test_presets_and_independent_fields();
     test_decimal_validation_and_overflow();
     test_navigation_and_review();
+    test_tunnel_fields();
     if (failures) {
         fprintf(stderr, "scan editor tests: %d failure(s)\n", failures);
         return 1;

@@ -32,7 +32,16 @@
 #define VER_PATH_MAX 700u /* fits the stricter 1024-byte HPACK request block */
 #define VER_FLOW_MAX (16u * 1024u * 1024u)
 
-typedef enum { C_FREE = 0, C_CONNECT, C_HANDSHAKE, C_BODY, C_IDLE, C_DONE } cstate;
+typedef enum {
+    C_FREE = 0,
+    C_CONNECT,
+    C_SOCKS_METHOD,
+    C_SOCKS_CONNECT,
+    C_HANDSHAKE,
+    C_BODY,
+    C_IDLE,
+    C_DONE
+} cstate;
 typedef enum { P_NONE = 0, P_HTTP1, P_HTTP2 } proto;
 typedef enum { POOL_NONE = 0, POOL_ACTIVE, POOL_STABILITY } pool_class;
 
@@ -53,6 +62,7 @@ typedef struct {
     uint8_t        pool_class;
     size_t         idx;
     verify_pool   *pool;
+    qn_socks5_client socks;
 
     uint64_t t_start, t_conn, t_hs, t_first;
     uint64_t profile_seed;
@@ -685,7 +695,31 @@ static bool valid_verify_cfg(const qn_verify_cfg *cfg)
            (!cfg->profile ||
             (cfg->profile->version == QN_PROFILE_INSTANCE_VERSION &&
              cfg->profile->support != QN_PROFILE_UNSUPPORTED &&
-             !strcmp(cfg->profile->sni, cfg->sni)));
+             !strcmp(cfg->profile->sni, cfg->sni))) &&
+           (!cfg->socks_enabled ||
+            ((cfg->socks_address.af == AF_INET || cfg->socks_address.af == AF_INET6) &&
+             cfg->socks_port != 0u && cfg->socks_target_port != 0u &&
+             qn_valid_hostname(cfg->socks_target_host)));
+}
+
+static bool start_tls(conn *c, qn_verify_result *result,
+                      const qn_verify_cfg *cfg)
+{
+    int hello_length;
+
+    result->observation.transport.connected = true;
+    c->t_conn = qn_now_ns();
+    c->deadline = qn_now_ms() + cfg->timeout_ms;
+    result->observation.transport.connect_us =
+        (uint32_t)((c->t_conn - c->t_start) / 1000u);
+    result->observation.transport.result = QN_R_OPEN;
+    errno = 0;
+    hello_length = qn_tls_start(&c->tls, c->outstore, sizeof c->outstore);
+    if (hello_length <= 0)
+        return false;
+    qn_outbuf_commit(&c->out, (size_t)hello_length);
+    c->st = C_HANDSHAKE;
+    return true;
 }
 
 static uint64_t trace_budget_ms(const qn_verify_cfg *cfg)
@@ -1205,7 +1239,8 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
             r = &out[c->idx];
             r->observation.transport.attempted = true;
             c->t_start = qn_now_ns();
-            c->fd = dial(&addrs[c->idx], c0.port);
+            c->fd = dial(c0.socks_enabled ? &c0.socks_address : &addrs[c->idx],
+                         c0.socks_enabled ? c0.socks_port : c0.port);
             if (c->fd < 0) {
                 dial_error = errno;
                 network_failure(r, dial_error, "socket");
@@ -1285,7 +1320,6 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
             if (c->st == C_CONNECT && (fl & (EPOLLOUT | EPOLLERR | EPOLLHUP))) {
                 int       err = 0;
                 socklen_t sl  = sizeof err;
-                int       hn;
 
                 if (verify_get_socket_error(c->fd, &err, &sl) != 0) {
                     err = errno;
@@ -1306,16 +1340,22 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
                     continue;
                 }
 
-                r->observation.transport.connected = true;
-                c->t_conn = qn_now_ns();
                 c->deadline = qn_now_ms() + c0.timeout_ms;
-                r->observation.transport.connect_us =
-                    (uint32_t)((c->t_conn - c->t_start) / 1000u);
-                r->observation.transport.result = QN_R_OPEN;
+                if (c0.socks_enabled) {
+                    uint8_t greeting[3];
 
-                errno = 0;
-                hn = qn_tls_start(&c->tls, c->outstore, sizeof c->outstore);
-                if (hn <= 0) {
+                    if (!qn_socks5_init(&c->socks, c0.socks_target_host,
+                                        c0.socks_target_port) ||
+                        qn_socks5_greeting(greeting) != sizeof greeting ||
+                        !qn_outbuf_queue(&c->out, greeting, sizeof greeting)) {
+                        failure(r, QN_TERM_LOCAL_ERROR, QN_FAIL_LOCAL, QN_R_ERROR,
+                                QN_TLS_NONE, EINVAL, 0, "socks-init");
+                        set_infra(&status, EINVAL);
+                        stop = true;
+                        break;
+                    }
+                    c->st = C_SOCKS_METHOD;
+                } else if (!start_tls(c, r, &c0)) {
                     int hello_error = errno ? errno : EIO;
                     failure(r, QN_TERM_LOCAL_ERROR, QN_FAIL_LOCAL, QN_R_ERROR, QN_TLS_NONE,
                             hello_error, 0, "hello");
@@ -1323,9 +1363,6 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
                     stop = true;
                     break;
                 }
-                qn_outbuf_commit(&c->out, (size_t)hn);
-                c->st = C_HANDSHAKE;
-
                 if (!flush_out(c)) {
                     int write_error = errno ? errno : EIO;
                     network_failure(r, write_error, "write");
@@ -1387,6 +1424,9 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
                         (void)absorb_h1_eof(c, r, &c0);
                     else if (c->st == C_IDLE)
                         note(r, "peer-closed");
+                    else if (c->st == C_SOCKS_METHOD || c->st == C_SOCKS_CONNECT)
+                        failure(r, QN_TERM_PEER_REJECTED, QN_FAIL_PROTOCOL, QN_R_OPEN,
+                                QN_TLS_NONE, 0, 0, "socks-eof");
                     else if (!r->observation.tls.handshake_complete)
                         failure(r, QN_TERM_PEER_REJECTED, QN_FAIL_PEER, QN_R_OPEN,
                                 QN_TLS_NONE, 0, 0, "early-eof");
@@ -1409,6 +1449,55 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
                     if (c->st == C_IDLE)
                         note(r, "reset-idle");
                     retire_conn(ep, c, r, &live, &done);
+                    continue;
+                }
+
+                if (c->st == C_SOCKS_METHOD || c->st == C_SOCKS_CONNECT) {
+                    uint8_t request[263];
+                    size_t consumed = 0u;
+                    size_t output_length = 0u;
+                    qn_socks5_action action = qn_socks5_feed(
+                        &c->socks, inbuf, (size_t)got, &consumed, request,
+                        sizeof request, &output_length);
+
+                    if (action == QN_SOCKS5_FAILED) {
+                        failure(r, QN_TERM_PEER_REJECTED, QN_FAIL_PROTOCOL, QN_R_OPEN,
+                                QN_TLS_NONE, 0, (int)c->socks.error, "socks-protocol");
+                        retire_conn(ep, c, r, &live, &done);
+                        continue;
+                    }
+                    if (action == QN_SOCKS5_SEND_CONNECT) {
+                        if (!qn_outbuf_queue(&c->out, request, output_length)) {
+                            failure(r, QN_TERM_LOCAL_ERROR, QN_FAIL_LOCAL, QN_R_ERROR,
+                                    QN_TLS_NONE, ENOBUFS, 0, "socks-request");
+                            set_infra(&status, ENOBUFS);
+                            stop = true;
+                            break;
+                        }
+                        c->st = C_SOCKS_CONNECT;
+                    } else if (action == QN_SOCKS5_READY && !start_tls(c, r, &c0)) {
+                        int hello_error = errno ? errno : EIO;
+
+                        failure(r, QN_TERM_LOCAL_ERROR, QN_FAIL_LOCAL, QN_R_ERROR,
+                                QN_TLS_NONE, hello_error, 0, "hello");
+                        set_infra(&status, hello_error);
+                        stop = true;
+                        break;
+                    }
+                    if (qn_outbuf_pending(&c->out) && !flush_out(c)) {
+                        network_failure(r, errno ? errno : EIO, "socks-write");
+                        retire_conn(ep, c, r, &live, &done);
+                        continue;
+                    }
+                    if (!arm(ep, c, qn_outbuf_pending(&c->out)
+                                        ? (EPOLLIN | EPOLLOUT) : EPOLLIN)) {
+                        int arm_error = errno;
+
+                        failure(r, QN_TERM_LOCAL_ERROR, QN_FAIL_LOCAL, QN_R_ERROR,
+                                QN_TLS_NONE, arm_error, 0, "epoll-mod");
+                        set_infra(&status, arm_error);
+                        stop = true;
+                    }
                     continue;
                 }
 
@@ -1590,7 +1679,10 @@ qn_verify_status qn_verify_run(const qn_verify_cfg *cfg, const qn_addr *addrs, s
                 continue;
             }
             if (now >= c->deadline) {
-                if (!r->observation.transport.connected)
+                if (c->st == C_SOCKS_METHOD || c->st == C_SOCKS_CONNECT)
+                    failure(r, QN_TERM_TIMEOUT, QN_FAIL_PATH, QN_R_TIMEOUT,
+                            QN_TLS_NONE, ETIMEDOUT, 0, "socks-timeout");
+                else if (!r->observation.transport.connected)
                     failure(r, QN_TERM_TIMEOUT, QN_FAIL_PATH, QN_R_TIMEOUT,
                             QN_TLS_NONE, ETIMEDOUT, 0, "connect-timeout");
                 else if (!r->observation.tls.handshake_complete)

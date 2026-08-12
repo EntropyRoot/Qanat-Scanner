@@ -14,6 +14,8 @@
 
 #define QN_MIB (UINT64_C(1) << 20)
 #define QN_PLAN_FD_RESERVE UINT64_C(64)
+#define QN_PLAN_TUNNEL_FDS UINT64_C(3)
+#define QN_PLAN_TUNNEL_WORKER_BYTES UINT64_C(65536)
 
 static bool add_u64(uint64_t a, uint64_t b, uint64_t *out)
 {
@@ -185,6 +187,17 @@ bool qn_scan_request_validate(const qn_scan_request *request,
         (!request->verify_concurrency_auto && !request->verify_concurrency) ||
         (!request->stability_concurrency_auto && !request->stability_concurrency))
         return request_error(error, error_capacity, "Concurrency must be greater than zero");
+    if (request->tunnel_enabled && !request->tunnel_all && !request->tunnel_target)
+        return request_error(error, error_capacity,
+                             "Tunnel Target must be greater than zero or All");
+    if (request->tunnel_enabled &&
+        (!request->tunnel_concurrency || request->tunnel_concurrency > 32u))
+        return request_error(error, error_capacity,
+                             "Tunnel Concurrency must be from 1 to 32");
+    if (request->tunnel_enabled &&
+        (!request->tunnel_attempts || request->tunnel_attempts > 2u))
+        return request_error(error, error_capacity,
+                             "Tunnel Attempts must be from 1 to 2");
     return true;
 }
 
@@ -255,13 +268,18 @@ bool qn_scan_request_equal(const qn_scan_request *a, const qn_scan_request *b)
            a->scan_concurrency == b->scan_concurrency &&
            a->verify_concurrency == b->verify_concurrency &&
            a->stability_concurrency == b->stability_concurrency &&
+           a->tunnel_target == b->tunnel_target &&
+           a->tunnel_concurrency == b->tunnel_concurrency &&
+           a->tunnel_attempts == b->tunnel_attempts &&
            a->candidate_auto == b->candidate_auto &&
            a->finalists_auto == b->finalists_auto &&
            a->finalists_all == b->finalists_all &&
            a->output_all == b->output_all && a->memory_auto == b->memory_auto &&
            a->scan_concurrency_auto == b->scan_concurrency_auto &&
            a->verify_concurrency_auto == b->verify_concurrency_auto &&
-           a->stability_concurrency_auto == b->stability_concurrency_auto;
+           a->stability_concurrency_auto == b->stability_concurrency_auto &&
+           a->tunnel_enabled == b->tunnel_enabled &&
+           a->tunnel_all == b->tunnel_all;
 }
 
 qn_scan_preset qn_scan_preset_detect(const qn_scan_request *request)
@@ -312,6 +330,9 @@ static const qn_setting_desc setting_desc[] = {
     QN_SETTING("scan_concurrency", QN_SETTING_U32, scan_concurrency, UINT32_MAX),
     QN_SETTING("verify_concurrency", QN_SETTING_U32, verify_concurrency, UINT32_MAX),
     QN_SETTING("stability_concurrency", QN_SETTING_U32, stability_concurrency, UINT32_MAX),
+    QN_SETTING("tunnel_target", QN_SETTING_U64, tunnel_target, UINT32_MAX),
+    QN_SETTING("tunnel_concurrency", QN_SETTING_U32, tunnel_concurrency, 32u),
+    QN_SETTING("tunnel_attempts", QN_SETTING_U32, tunnel_attempts, 2u),
     QN_SETTING("candidate_auto", QN_SETTING_BOOL, candidate_auto, 1u),
     QN_SETTING("finalists_auto", QN_SETTING_BOOL, finalists_auto, 1u),
     QN_SETTING("finalists_all", QN_SETTING_BOOL, finalists_all, 1u),
@@ -320,7 +341,9 @@ static const qn_setting_desc setting_desc[] = {
     QN_SETTING("scan_concurrency_auto", QN_SETTING_BOOL, scan_concurrency_auto, 1u),
     QN_SETTING("verify_concurrency_auto", QN_SETTING_BOOL, verify_concurrency_auto, 1u),
     QN_SETTING("stability_concurrency_auto", QN_SETTING_BOOL,
-               stability_concurrency_auto, 1u)
+               stability_concurrency_auto, 1u),
+    QN_SETTING("tunnel_enabled", QN_SETTING_BOOL, tunnel_enabled, 1u),
+    QN_SETTING("tunnel_all", QN_SETTING_BOOL, tunnel_all, 1u)
 };
 
 #undef QN_SETTING
@@ -508,6 +531,19 @@ static const qn_setting_desc *setting_find(const char *name, size_t *index)
     return NULL;
 }
 
+static uint64_t settings_mask(bool tunnel)
+{
+    uint64_t mask = 0u;
+
+    for (size_t i = 0u; i < sizeof setting_desc / sizeof setting_desc[0]; i++) {
+        bool is_tunnel = !strncmp(setting_desc[i].name, "tunnel_", 7u);
+
+        if (is_tunnel == tunnel)
+            mask |= UINT64_C(1) << i;
+    }
+    return mask;
+}
+
 bool qn_scan_settings_load(const char *path, qn_scan_request *request,
                            char *error, size_t error_capacity)
 {
@@ -516,6 +552,7 @@ bool qn_scan_settings_load(const char *path, qn_scan_request *request,
     char *line = NULL;
     size_t line_capacity = 0u;
     uint64_t seen = 0u;
+    uint64_t settings_version = 0u;
     bool version_seen = false;
     bool ok = true;
 
@@ -553,11 +590,13 @@ bool qn_scan_settings_load(const char *path, qn_scan_request *request,
             break;
         }
         if (!strcmp(line, "version")) {
-            if (version_seen || value != QN_SCAN_SETTINGS_VERSION) {
+            if (version_seen || (value != 1u &&
+                                 value != QN_SCAN_SETTINGS_VERSION)) {
                 ok = false;
                 break;
             }
             version_seen = true;
+            settings_version = value;
             continue;
         }
         desc = setting_find(line, &index);
@@ -572,9 +611,23 @@ bool qn_scan_settings_load(const char *path, qn_scan_request *request,
     if (ferror(file) || fclose(file) != 0)
         ok = false;
     free(line);
-    if (!version_seen || seen != ((UINT64_C(1) <<
-                                   (sizeof setting_desc / sizeof setting_desc[0])) - 1u))
+    if (!version_seen)
         ok = false;
+    else if (settings_version == QN_SCAN_SETTINGS_VERSION) {
+        uint64_t all = (UINT64_C(1) <<
+                        (sizeof setting_desc / sizeof setting_desc[0])) - 1u;
+
+        if (seen != all)
+            ok = false;
+    } else {
+        uint64_t tunnel = settings_mask(true);
+
+        if (seen != settings_mask(false) || (seen & tunnel))
+            ok = false;
+        loaded.tunnel_enabled = false;
+        loaded.tunnel_all = false;
+        loaded.tunnel_target = 0u;
+    }
     if (!ok)
         return request_error(error, error_capacity, "settings file is malformed or incomplete");
     if (!qn_scan_request_validate(&loaded, error, error_capacity))
@@ -785,7 +838,7 @@ static bool resolve_concurrency(const qn_scan_request *request,
     uint64_t available = environment->fd_limit > QN_PLAN_FD_RESERVE
                              ? environment->fd_limit - QN_PLAN_FD_RESERVE
                              : 0u;
-    uint64_t verify_fds;
+    uint64_t verify_fds, tunnel_fds = 0u, phase_fds;
 
     plan->scan_concurrency = request->scan_concurrency_auto
                                  ? auto_scan_concurrency(environment)
@@ -803,6 +856,13 @@ static bool resolve_concurrency(const qn_scan_request *request,
         return plan_error(plan, "file descriptor limit leaves fewer than two verifier slots");
 
     verify_fds = (uint64_t)plan->verify_concurrency + plan->stability_concurrency;
+    if (request->tunnel_enabled &&
+        !mul_u64(request->tunnel_concurrency, QN_PLAN_TUNNEL_FDS,
+                 &tunnel_fds))
+        return plan_error(plan, "tunnel file descriptor estimate overflowed");
+    phase_fds = verify_fds > tunnel_fds ? verify_fds : tunnel_fds;
+    if (tunnel_fds > available)
+        return plan_error(plan, "Tunnel Concurrency exceeds the file descriptor budget");
     if (verify_fds > available) {
         if (!request->verify_concurrency_auto || !request->stability_concurrency_auto)
             return plan_error(plan, "requested verifier concurrency exceeds the file descriptor budget");
@@ -819,18 +879,21 @@ static bool resolve_concurrency(const qn_scan_request *request,
         plan->scan_concurrency = (uint32_t)available;
         plan->auto_adjusted = true;
     }
-    plan->estimated_fds = QN_PLAN_FD_RESERVE +
-                          ((uint64_t)plan->scan_concurrency >
-                                   (uint64_t)plan->verify_concurrency + plan->stability_concurrency
-                               ? plan->scan_concurrency
-                               : (uint64_t)plan->verify_concurrency + plan->stability_concurrency);
+    phase_fds = (uint64_t)plan->verify_concurrency +
+                plan->stability_concurrency;
+    if (tunnel_fds > phase_fds)
+        phase_fds = tunnel_fds;
+    if ((uint64_t)plan->scan_concurrency > phase_fds)
+        phase_fds = plan->scan_concurrency;
+    plan->estimated_fds = QN_PLAN_FD_RESERVE + phase_fds;
     return true;
 }
 
 static bool memory_estimate(qn_scan_plan *plan,
                             const qn_scan_environment *environment)
 {
-    uint64_t slots, results, verifier, candidate, working, page;
+    uint64_t slots, results, verifier, tunnel = 0u, tunnel_worker;
+    uint64_t transient, candidate, working, page;
 
     if (!mul_u64(plan->candidate_capacity, environment->candidate_bytes, &candidate) ||
         !add_u64(candidate, environment->candidate_fixed_bytes, &candidate) ||
@@ -840,6 +903,16 @@ static bool memory_estimate(qn_scan_plan *plan,
         !add_u64(verifier, results, &verifier) ||
         !add_u64(verifier, environment->verifier_fixed_bytes, &verifier))
         return plan_error(plan, "resource plan arithmetic overflowed");
+    if (plan->tunnel_enabled) {
+        if (!add_u64(environment->verifier_slot_bytes,
+                     environment->verifier_result_bytes, &tunnel_worker) ||
+            !add_u64(tunnel_worker, environment->verifier_fixed_bytes,
+                     &tunnel_worker) ||
+            !add_u64(tunnel_worker, QN_PLAN_TUNNEL_WORKER_BYTES,
+                     &tunnel_worker) ||
+            !mul_u64(plan->tunnel_concurrency, tunnel_worker, &tunnel))
+            return plan_error(plan, "tunnel resource plan arithmetic overflowed");
+    }
     working = environment->working_bytes;
     page = environment->page_size ? environment->page_size : 4096u;
     if (page > 1u) {
@@ -853,8 +926,10 @@ static bool memory_estimate(qn_scan_plan *plan,
     }
     plan->estimated_candidate_bytes = candidate;
     plan->estimated_verifier_bytes = verifier;
+    plan->estimated_tunnel_bytes = tunnel;
     plan->estimated_working_bytes = working;
-    if (!add_u64(candidate, verifier, &plan->estimated_total_bytes) ||
+    transient = verifier > tunnel ? verifier : tunnel;
+    if (!add_u64(candidate, transient, &plan->estimated_total_bytes) ||
         !add_u64(plan->estimated_total_bytes, working,
                  &plan->estimated_total_bytes))
         return plan_error(plan, "resource plan arithmetic overflowed");
@@ -866,6 +941,7 @@ bool qn_scan_plan_resolve(const qn_scan_request *request,
                           qn_scan_plan *plan)
 {
     uint64_t candidate, finalist, output, batch;
+    char request_message[192];
 
     if (!plan)
         return false;
@@ -875,6 +951,9 @@ bool qn_scan_plan_resolve(const qn_scan_request *request,
         !environment->candidate_bytes || !environment->verifier_slot_bytes ||
         !environment->verifier_result_bytes)
         return plan_error(plan, "scan plan environment is incomplete");
+    if (!qn_scan_request_validate(request, request_message,
+                                  sizeof request_message))
+        return plan_error(plan, request_message);
     if (environment->working_capacity_bytes &&
         environment->working_bytes > environment->working_capacity_bytes)
         return plan_error(plan, "range metadata exceeds the working arena capacity");
@@ -891,6 +970,10 @@ bool qn_scan_plan_resolve(const qn_scan_request *request,
     plan->normalized_prefixes = environment->normalized_prefixes;
     plan->input_addresses = environment->input_addresses;
     plan->duplicate_addresses = environment->duplicate_addresses;
+    plan->tunnel_enabled = request->tunnel_enabled;
+    plan->tunnel_all = request->tunnel_all;
+    plan->tunnel_concurrency = request->tunnel_concurrency;
+    plan->tunnel_attempts = request->tunnel_attempts;
     plan->fd_limit = environment->fd_limit;
     plan->representative = request->selection == QN_SELECTION_UNIFORM ||
                            request->selection == QN_SELECTION_STRATIFIED;
@@ -938,6 +1021,22 @@ bool qn_scan_plan_resolve(const qn_scan_request *request,
         return plan_error(plan, "Finalist Count must be between 1 and Candidate Capacity");
     plan->finalist_limit = finalist;
 
+    if (request->tunnel_enabled) {
+        plan->tunnel_target = request->tunnel_all ? finalist
+                                                  : request->tunnel_target;
+        if (plan->tunnel_target > finalist) {
+            plan->tunnel_target = finalist;
+            plan->auto_adjusted = true;
+        }
+        if (plan->tunnel_concurrency > plan->tunnel_target) {
+            plan->tunnel_concurrency = (uint32_t)plan->tunnel_target;
+            plan->auto_adjusted = true;
+        }
+        if (!plan->tunnel_target || !plan->tunnel_concurrency ||
+            !plan->tunnel_attempts)
+            return plan_error(plan, "tunnel resource plan is empty");
+    }
+
     if (request->output_all) {
         output = finalist;
         plan->output_all = true;
@@ -964,18 +1063,20 @@ bool qn_scan_plan_resolve(const qn_scan_request *request,
     if (!memory_estimate(plan, environment))
         return false;
     if (plan->estimated_total_bytes > plan->memory_budget_bytes) {
-        uint64_t fixed, candidate_budget, page;
+        uint64_t fixed, candidate_budget, page, transient;
 
         if (!request->candidate_auto)
             return plan_error(plan, "requested Candidate Capacity exceeds the memory budget");
-        if (!add_u64(plan->estimated_working_bytes,
-                     plan->estimated_verifier_bytes, &fixed) ||
+        transient = plan->estimated_verifier_bytes > plan->estimated_tunnel_bytes
+                        ? plan->estimated_verifier_bytes
+                        : plan->estimated_tunnel_bytes;
+        if (!add_u64(plan->estimated_working_bytes, transient, &fixed) ||
             !add_u64(fixed, environment->candidate_fixed_bytes, &fixed) ||
             fixed >= plan->memory_budget_bytes)
             return plan_error(plan, "working set and verifier exceed the memory budget");
         candidate_budget = plan->memory_budget_bytes -
                            plan->estimated_working_bytes -
-                           plan->estimated_verifier_bytes;
+                           transient;
         page = environment->page_size ? environment->page_size : 4096u;
         if (page > 1u)
             candidate_budget -= candidate_budget % page;

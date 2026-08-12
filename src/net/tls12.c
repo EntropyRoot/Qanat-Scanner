@@ -5,7 +5,6 @@
 
 #include <string.h>
 
-#define GROUP_X25519 0x001D
 #define VERIFY_LEN   12
 
 bool qn_tls12_suite(uint16_t suite, qn_hash_id *h, qn_aead_id *a)
@@ -149,17 +148,22 @@ static qn_tls_rc on_server_kx(qn_tls_session *s)
     size_t         n   = s->hs_kept;
     size_t         off;
     uint16_t       siglen;
+    uint16_t       group;
     uint8_t        klen;
 
     if (s->hs_len != s->hs_kept || n < 4u)
         return QN_TLS_RC_PROTO;
     if (m[0] != 0x03)
         return QN_TLS_RC_UNSUPPORTED; /* only named curves */
-    if (((uint16_t)m[1] << 8 | m[2]) != GROUP_X25519)
+    group = (uint16_t)((uint16_t)m[1] << 8 | m[2]);
+    if (group != QN_GROUP_X25519 && group != QN_GROUP_P256)
         return QN_TLS_RC_UNSUPPORTED;
 
     klen = m[3];
-    if (klen != QN_X25519_LEN || n < 4u + klen)
+    if (n < 4u + klen ||
+        (group == QN_GROUP_X25519 && klen != QN_X25519_LEN) ||
+        (group == QN_GROUP_P256 &&
+         (klen != QN_P256_PUBLIC_LEN || m[4] != 0x04u)))
         return QN_TLS_RC_PROTO;
     off = 4u + klen;
 
@@ -185,7 +189,9 @@ static qn_tls_rc on_server_kx(qn_tls_session *s)
     if (off != n)
         return QN_TLS_RC_PROTO; /* trailing bytes are malformed framing */
 
-    memcpy(s->peer_pub, m + 4, QN_X25519_LEN);
+    memcpy(s->peer_pub, m + 4, klen);
+    s->peer_group = group;
+    s->peer_pub_len = klen;
     s->have_peer = true;
     return QN_TLS_RC_OK;
 }
@@ -246,22 +252,35 @@ static bool finished_data(qn_tls_session *s, const char *label, const qn_hash *t
 static qn_tls_rc on_hello_done(qn_tls_session *s, qn_tls_io *io)
 {
     static const uint8_t CCS[] = { RT_CCS, 0x03, 0x03, 0x00, 0x01, 0x01 };
-    uint8_t              cke[4 + 1 + QN_X25519_LEN];
+    uint8_t              cke[4 + 1 + QN_P256_PUBLIC_LEN];
     uint8_t              fin[4 + VERIFY_LEN];
-    uint8_t              pms[QN_X25519_LEN];
-    size_t               ckelen = 4u + 1u + QN_X25519_LEN;
+    uint8_t              pms[QN_P256_SECRET_LEN];
+    const uint8_t       *client_pub;
+    size_t               client_pub_len;
+    size_t               ckelen;
     qn_tls_rc            rc     = QN_TLS_RC_PROTO;
     int                  n;
 
     if (!s->have_peer)
         return QN_TLS_RC_PROTO;
 
+    if (s->peer_group == QN_GROUP_X25519) {
+        client_pub = s->x_pk;
+        client_pub_len = QN_X25519_LEN;
+    } else if (s->peer_group == QN_GROUP_P256) {
+        client_pub = s->p256_pk;
+        client_pub_len = QN_P256_PUBLIC_LEN;
+    } else {
+        return QN_TLS_RC_UNSUPPORTED;
+    }
+    ckelen = 4u + 1u + client_pub_len;
+
     cke[0] = HS_CLIENT_KX;
     cke[1] = 0;
     cke[2] = 0;
-    cke[3] = 1u + QN_X25519_LEN;
-    cke[4] = QN_X25519_LEN;
-    memcpy(cke + 5, s->x_pk, QN_X25519_LEN);
+    cke[3] = (uint8_t)(1u + client_pub_len);
+    cke[4] = (uint8_t)client_pub_len;
+    memcpy(cke + 5, client_pub, client_pub_len);
 
     if (io->outlen + REC_HDR + ckelen + sizeof CCS > io->outcap)
         return QN_TLS_RC_SPACE;
@@ -276,7 +295,10 @@ static qn_tls_rc on_hello_done(qn_tls_session *s, qn_tls_io *io)
 
     qn_hash_update(&s->transcript, cke, ckelen);
 
-    if (!qn_x25519(pms, s->x_sk, s->peer_pub))
+    if ((s->peer_group == QN_GROUP_X25519 &&
+         !qn_x25519(pms, s->x_sk, s->peer_pub)) ||
+        (s->peer_group == QN_GROUP_P256 &&
+         !qn_p256(pms, s->p256_sk, s->peer_pub)))
         return QN_TLS_RC_BADMAC;
 
     /* With EMS the master secret binds the transcript through ClientKeyExchange. */

@@ -9,11 +9,18 @@ int qn_http_build_get(uint8_t *buf, size_t cap, const char *host, const char *pa
     static const char prefix[] = "GET ";
     static const char between[] = " HTTP/1.1\r\nHost: ";
     static const char suffix[] =
-        "\r\nUser-Agent: Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36\r\n"
-        "Accept: */*\r\n"
-        "Accept-Encoding: identity\r\n"
-        "Connection: close\r\n\r\n";
+        "\r\nConnection: keep-alive\r\n"
+        "Sec-CH-UA: \"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", "
+        "\"Chromium\";v=\"151\"\r\n"
+        "Sec-CH-UA-Mobile: ?1\r\nSec-CH-UA-Platform: \"Android\"\r\n"
+        "Upgrade-Insecure-Requests: 1\r\n"
+        "User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36\r\n"
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+        "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\n"
+        "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\n"
+        "Sec-Fetch-Dest: document\r\nAccept-Encoding: gzip, deflate, br, zstd\r\n"
+        "Accept-Language: fa,en-US;q=0.9,en;q=0.8,de;q=0.7\r\n\r\n";
     const size_t fixed = (sizeof prefix - 1u) + (sizeof between - 1u) +
                          (sizeof suffix - 1u);
     size_t host_len, path_len, total;

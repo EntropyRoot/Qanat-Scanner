@@ -16,7 +16,7 @@ typedef enum {
     QN_H2_OK = 0,
     QN_H2_PROTOCOL,
     QN_H2_SPACE,
-    QN_H2_UNSUPPORTED /* well-formed but beyond this subset, e.g. Huffman */
+    QN_H2_UNSUPPORTED /* well-formed but beyond the bounded parser */
 } qn_h2_rc;
 
 /* Peer data on a stream without a sent request is a protocol error, not evidence. */
@@ -108,7 +108,7 @@ bool qn_h2_open_stream(qn_h2 *h, uint32_t stream_id);
 /* True once a complete, valid response head has been observed. */
 bool qn_h2_stream_has_head(const qn_h2 *h, uint32_t stream_id);
 
-/* Preface, SETTINGS, and a 16 MiB window. */
+/* Browser-shaped preface, SETTINGS, and connection window. */
 int qn_h2_preface(uint8_t *out, size_t cap);
 int qn_h2_preface_profile(const qn_client_profile *profile, uint64_t seed,
                            uint8_t *out, size_t cap);
@@ -120,7 +120,7 @@ int qn_h2_get(uint32_t stream_id, const char *authority, const char *path,
               uint8_t *out, size_t cap);
 int qn_h2_get_profile(const qn_client_profile *profile, uint64_t seed,
                       uint32_t stream_id, const char *authority,
-                       const char *path, uint8_t *out, size_t cap);
+                      const char *path, uint8_t *out, size_t cap);
 int qn_h2_get_instance(const qn_profile_instance *instance, uint32_t stream_id,
                        const char *authority, const char *path,
                        uint8_t *out, size_t cap);
