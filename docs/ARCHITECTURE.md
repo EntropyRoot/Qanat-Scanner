@@ -168,7 +168,7 @@ bounded at the plan's capacity. Reaching a reachable target publishes
 `QN_TASK_STOP_CONDITION`, and already in-flight jobs settle through the normal
 accounting contract without turning satisfied work into an incomplete run.
 
-JSON schema 6 exports the stable range digest, resolved plan, candidate and
+JSON schema 7 exports the stable range digest, resolved plan, candidate and
 finalist counts, calibration cohort, accounting, profile version, score version,
 and build fingerprint. Partial scans are labelled "best observed among scanned
 addresses" and make no claim about unscanned addresses.
@@ -198,7 +198,7 @@ Certificate identity is parsed for display but not authenticated. See [TLS](TLS.
 
 ## Ranking and History
 
-Records carry bounded RTT samples, loss, minimum, median, nearest-rank p90, and a metric explicitly named `mean_consecutive_rtt_delta`. A two-sided distribution-free 90% interval for the population median is emitted only from five or more successful observations; smaller samples carry an explicit unavailable state. Sweep minima are not final ranking evidence. A diversified calibration cohort is robustly re-sampled before finalist selection. Score version 2 combines marker evidence, median/p90 latency, loss, jitter, stability, confidence, and optional throughput, with deterministic address tie-breaks.
+Records carry bounded RTT samples, loss, minimum, median, nearest-rank p90, and a metric explicitly named `mean_consecutive_rtt_delta`. A two-sided distribution-free 90% interval for the population median is emitted only from five or more successful observations; smaller samples carry an explicit unavailable state. Sweep minima are not final ranking evidence. A diversified calibration cohort is robustly re-sampled before finalist selection. Score version 3 adds an ordered tunnel component to marker evidence, median/p90 latency, loss, jitter, stability, confidence, and optional throughput, with deterministic address tie-breaks. A passed tunnel outranks edge-only evidence, while untested and known-failed states remain distinct.
 
 The history store applies exponential decay with a three-day half-life. It records a coarse local path tag derived from link type and address prefix, not an operator account or device identifier. Repeated recent observations and evidence on multiple path tags receive more confidence than an old single success.
 
@@ -213,6 +213,17 @@ The TLS, HTTP/1.1, and HTTP/2 code is a bounded measurement client:
 - HTTP/2 dynamic compression is not a general browser implementation;
 - TLS supports only the suites and handshake shapes needed by the probe;
 - no protocol component is intended as an application security library.
+
+The profile instance fixes one cross-layer persona, while a connection seed
+materializes fresh randoms, key shares, GREASE values, Chrome extension order,
+and ECH padding. Seeded runs derive this input deterministically; ordinary runs
+use fresh entropy. Chrome 151 and Firefox 153 shapes are pinned to sanitized
+Android captures. Safari 26 is source/reference-derived and labelled as such.
+
+The modern TLS path implements X25519MLKEM768, X25519, and P-256 key exchange,
+including HelloRetryRequest transcript reconstruction. A full browser offer can
+contain legacy branches outside the bounded executor; an unsupported server
+selection is typed rather than silently treated as a successful profile match.
 
 This narrow scope is an architectural feature. New protocol behavior should be added only when it improves a concrete measurement and comes with parser, state-machine, adversarial-peer, and fuzz coverage.
 

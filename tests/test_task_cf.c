@@ -473,6 +473,104 @@ static void test_robust_samples_select_finalists_after_calibration(void)
     destroy_scan(&scan, &arena);
 }
 
+static char *read_text(const char *path)
+{
+    FILE *file = fopen(path, "rb");
+    char *body;
+    long end;
+    size_t length;
+
+    if (!file)
+        return NULL;
+    if (fseek(file, 0, SEEK_END) != 0 || (end = ftell(file)) < 0 ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        (void)fclose(file);
+        return NULL;
+    }
+    length = (size_t)end;
+    body = (char *)malloc(length + 1u);
+    if (!body) {
+        (void)fclose(file);
+        return NULL;
+    }
+    if (fread(body, 1u, length, file) != length || fclose(file) != 0) {
+        free(body);
+        return NULL;
+    }
+    body[length] = '\0';
+    return body;
+}
+
+static void test_tunnel_accounting_and_secret_boundary(void)
+{
+    static const char *const secret =
+        "123e4567-e89b-12d3-a456-426614174000";
+    static const char *const link =
+        "vless://123e4567-e89b-12d3-a456-426614174000@origin.example:443?"
+        "type=ws&security=tls&sni=sni.example&host=host.example&path=%2Fedge";
+    char directory[] = "qanat-tunnel-accounting-XXXXXX";
+    char log_path[256];
+    char *old_path;
+    char *body;
+    qn_config config;
+    cf_scan scan;
+    cf_record records[3];
+
+    CHECK(mkdtemp(directory) != NULL);
+    CHECK(snprintf(log_path, sizeof log_path, "%s/events.log", directory) > 0);
+    old_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+    CHECK(setenv("PATH", "", 1) == 0);
+    qn_config_defaults(&config);
+    memset(&scan, 0, sizeof scan);
+    memset(records, 0, sizeof records);
+    config.tunnel_link = link;
+    config.xray_path = "auto";
+    config.event_log = log_path;
+    config.scan_plan.valid = true;
+    config.scan_plan.tunnel_enabled = true;
+    config.scan_plan.tunnel_target = 2u;
+    config.scan_plan.tunnel_concurrency = 2u;
+    config.scan_plan.tunnel_attempts = 2u;
+    scan.cfg = &config;
+    scan.rec = records;
+    scan.n = scan.cap = 3u;
+    for (uint32_t i = 0u; i < 3u; i++) {
+        records[i].addr.af = AF_INET;
+        records[i].addr.u.v4 = 0xc0000201u + i;
+        records[i].verified = 1u;
+        records[i].highest_rung_reached = QN_RUNG_EDGE;
+        records[i].terminal_outcome = QN_TERM_SUCCESS;
+        memcpy(records[i].colo, "TST", 4u);
+    }
+    CHECK(cf_scan_tunnel(&scan) == QN_RUN_INCOMPLETE);
+    CHECK(atomic_load_explicit(&scan.tunnel_queued,
+                               memory_order_acquire) == 2u);
+    CHECK(atomic_load_explicit(&scan.tunnel_passed,
+                               memory_order_acquire) == 0u);
+    CHECK(atomic_load_explicit(&scan.tunnel_failed,
+                               memory_order_acquire) == 0u);
+    CHECK(atomic_load_explicit(&scan.tunnel_skipped,
+                               memory_order_acquire) == 2u);
+    CHECK(records[0].tunnel_state == QN_TUNNEL_BINARY_MISSING);
+    CHECK(records[1].tunnel_state == QN_TUNNEL_BINARY_MISSING);
+    CHECK(records[2].tunnel_state == QN_TUNNEL_UNTESTED);
+    body = read_text(log_path);
+    CHECK(body != NULL);
+    if (body) {
+        CHECK(strstr(body, secret) == NULL);
+        CHECK(strstr(body, "binary-missing") != NULL);
+        free(body);
+    }
+    if (old_path) {
+        CHECK(setenv("PATH", old_path, 1) == 0);
+        free(old_path);
+    } else {
+        CHECK(unsetenv("PATH") == 0);
+    }
+    CHECK(unlink(log_path) == 0);
+    CHECK(rmdir(directory) == 0);
+}
+
 int main(void)
 {
     test_limit_above_cap_cannot_overflow();
@@ -483,6 +581,7 @@ int main(void)
     test_partial_selection_is_unique_and_seed_deterministic();
     test_large_candidate_and_finalist_plans_allocate_bounded_storage();
     test_robust_samples_select_finalists_after_calibration();
+    test_tunnel_accounting_and_secret_boundary();
 
     if (failures) {
         fprintf(stderr, "task tests: %d failure(s)\n", failures);

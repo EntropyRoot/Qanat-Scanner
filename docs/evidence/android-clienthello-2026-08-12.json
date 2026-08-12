@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "captured_at": "2026-08-12",
+  "capture_scope": "sanitized loopback ClientHello only",
+  "device": "Xiaomi 23090RA98G",
+  "sni": "localhost",
+  "privacy": "No URLs, browsing data, cookies, secrets, randoms, session IDs, or key bytes retained.",
+  "method": {
+    "transport": "adb reverse to a local bounded TLS-record listener",
+    "normalization": "GREASE values and random key bytes removed; ordered numeric TLS facts retained"
+  },
+  "samples": [
+    {
+      "profile": "chrome-android-151",
+      "package": "com.android.chrome",
+      "version": "151.0.7922.71",
+      "sample_count": 4,
+      "record_lengths_observed": [1789, 1821],
+      "cipher_suites": [4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49171, 49172, 156, 157, 47, 53],
+      "extension_set": [35, 0, 43, 51, 27, 10, 65281, 11, 65037, 18, 45, 23, 16, 17613, 13, 5],
+      "extension_order": "permuted independently per connection between fixed GREASE bookends",
+      "supported_groups": [4588, 29, 23, 24],
+      "key_shares": [
+        {"group": 4588, "length": 1216},
+        {"group": 29, "length": 32}
+      ],
+      "signature_algorithms": [2308, 2309, 2310, 1027, 2052, 1025, 1283, 2053, 1281, 2054, 1537],
+      "supported_versions": [772, 771],
+      "ech_grease_body_lengths_observed": [186, 218, 250, 282],
+      "ech_grease_shape": {"encoding": "outer", "kdf": 1, "aead": 1, "enc_length": 32},
+      "alps_codepoint": 17613
+    },
+    {
+      "profile": "firefox-android-153",
+      "package": "org.mozilla.firefox",
+      "version": "153.0.3",
+      "sample_count": 2,
+      "record_lengths_observed": [1888],
+      "cipher_suites": [4865, 4867, 4866, 49195, 49199, 52393, 52392, 49196, 49200, 49162, 49171, 49172, 156, 157, 47, 53],
+      "extensions_ordered": [0, 23, 65281, 10, 11, 35, 16, 5, 34, 51, 43, 13, 45, 28, 27, 65037],
+      "supported_groups": [4588, 29, 23, 24, 25, 256, 257],
+      "key_shares": [
+        {"group": 4588, "length": 1216},
+        {"group": 29, "length": 32},
+        {"group": 23, "length": 65}
+      ],
+      "signature_algorithms": [1027, 1283, 1539, 2052, 2053, 2054, 1025, 1281, 1537, 515, 513],
+      "supported_versions": [772, 771],
+      "ech_grease_body_lengths_observed": [281],
+      "ech_grease_shape": {"encoding": "outer", "kdf": 1, "aead": 3, "enc_length": 32, "payload_length": 239}
+    }
+  ],
+  "channel_deltas": [
+    {
+      "packages": ["com.chrome.beta", "com.chrome.dev", "com.chrome.canary"],
+      "versions": ["152.0.7977.30", "153.0.7993.0", "153.0.7998.0"],
+      "delta_from_stable": "experimental extension 0xca34 and a leading GREASE signature scheme; intentionally excluded from the stable profile"
+    },
+    {
+      "package": "com.brave.browser",
+      "version": "1.93.134",
+      "delta_from_stable": "normalized TLS shape matched stable Chromium in the sampled connection"
+    }
+  ],
+  "source_cross_checks": {
+    "boringssl_commit": "52ba6a143e03e9ac84369f79ac3d06dea0128dab",
+    "mlkem_native_commit": "69d24e37b8a04c6050ec55bc84a4228d7051bb4b",
+    "utls_commit": "23b1dac19c06c51e278468e29ac329eec605a31f"
+  }
+}

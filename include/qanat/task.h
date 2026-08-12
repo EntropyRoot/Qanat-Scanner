@@ -75,6 +75,12 @@ typedef struct {
     uint32_t verify_completed;
     int32_t  verify_errno;
     uint8_t  verify_state;
+    _Atomic bool tunnel_active;
+    qn_run_outcome tunnel_outcome;
+    _Atomic uint32_t tunnel_queued;
+    _Atomic uint32_t tunnel_passed;
+    _Atomic uint32_t tunnel_failed;
+    _Atomic uint32_t tunnel_skipped;
 
     /* SHA-256 of the range file this run actually parsed. */
     uint8_t  ranges_digest[32];
@@ -94,6 +100,7 @@ typedef struct {
 bool cf_scan_init(cf_scan *s, qn_arena *a, qn_config *cfg);
 bool cf_scan_next_phase(cf_scan *s);
 bool cf_scan_verify(cf_scan *s);
+qn_run_outcome cf_scan_tunnel(cf_scan *s);
 void cf_scan_finish(cf_scan *s);
 void cf_scan_destroy(cf_scan *s);
 void cf_scan_account_phase(cf_scan *s, const qn_engine_finalization *finalization);

@@ -25,6 +25,8 @@ CRYPTO_SRC := \
 	src/crypto/aesgcm.c \
 	src/crypto/aead.c \
 	src/crypto/x25519.c \
+	src/crypto/p256.c \
+	src/crypto/mlkem.c \
 	src/crypto/rand.c \
 	src/crypto/md5.c
 
@@ -80,6 +82,11 @@ SRC := \
 	src/net/tls12.c \
 	src/net/tls_cert.c \
 	src/net/tls_fp.c \
+	src/net/tunnel_link.c \
+	src/net/tunnel_config.c \
+	src/net/socks5.c \
+	src/net/tunnel_runtime.c \
+	src/net/xray_install.c \
 	src/net/verify.c \
 	src/task/task_cf.c \
 	src/task/task_discover.c \
@@ -250,6 +257,7 @@ TLS_VERIFY_BENCH_BIN := $(BUILD)/bench_tls_verify
 TLS_VERIFY_BENCH_SRC := \
 	tests/bench_tls_verify.c \
 	src/net/verify.c \
+	src/net/socks5.c \
 	src/net/http1.c \
 	src/net/http2.c \
 	src/net/observation.c \
@@ -281,6 +289,16 @@ TLS_TEST_SRC := \
 	src/net/tls_fp.c \
 	$(CRYPTO_SRC) \
 	src/core/perm.c \
+	src/core/util.c
+
+BROWSER_HELLO_TEST_BIN := $(BUILD)/test_browser_hello
+BROWSER_HELLO_TEST_SRC := \
+	tests/test_browser_hello.c \
+	$(TLS_CAPABILITY_SRC) \
+	src/net/tls_hello.c \
+	src/crypto/md5.c \
+	src/crypto/sha2.c \
+	src/crypto/rand.c \
 	src/core/util.c
 
 PROP_TEST_BIN := $(BUILD)/test_props
@@ -322,6 +340,7 @@ VERIFY_TEST_SRC := \
 	tests/test_verify.c \
 	tests/netsim.c \
 	src/net/verify.c \
+	src/net/socks5.c \
 	src/net/http1.c \
 	src/net/http2.c \
 	src/net/observation.c \
@@ -342,6 +361,7 @@ VERIFY_FAULT_TEST_BIN := $(BUILD)/test_verify_faults
 VERIFY_FAULT_TEST_SRC := \
 	tests/test_verify_faults.c \
 	src/net/verify.c \
+	src/net/socks5.c \
 	src/net/http1.c \
 	src/net/http2.c \
 	src/net/observation.c \
@@ -362,6 +382,8 @@ EXPORT_TEST_BIN := $(BUILD)/test_export
 EXPORT_TEST_SRC := \
 	tests/test_export.c \
 	src/export.c \
+	src/net/tunnel_link.c \
+	src/net/tunnel_config.c \
 	src/net/observation.c \
 	src/core/outcome.c \
 	src/core/scan_plan.c \
@@ -403,6 +425,10 @@ TASK_TEST_SRC := \
 	src/net/tls_fp.c \
 	src/net/tls_hello.c \
 	src/net/verify.c \
+	src/net/socks5.c \
+	src/net/tunnel_link.c \
+	src/net/tunnel_config.c \
+	src/net/tunnel_runtime.c \
 	$(CRYPTO_SRC) \
 	src/task/task_cf.c
 
@@ -437,12 +463,47 @@ SCAN_PLAN_TEST_SRC := tests/test_scan_plan.c src/core/scan_plan.c
 SCAN_EDITOR_TEST_BIN := $(BUILD)/test_scan_editor
 SCAN_EDITOR_TEST_SRC := tests/test_scan_editor.c src/ui/scan_editor.c src/core/scan_plan.c
 
+TUNNEL_TEST_BIN := $(BUILD)/test_tunnel
+TUNNEL_TEST_SRC := \
+	tests/test_tunnel.c \
+	tests/fake_socks.c \
+	src/net/tunnel_link.c \
+	src/net/tunnel_config.c \
+	src/net/socks5.c \
+	src/core/util.c
+
+TUNNEL_RUNTIME_TEST_BIN := $(BUILD)/test_tunnel_runtime
+TUNNEL_RUNTIME_TEST_SRC := \
+	tests/test_tunnel_runtime.c \
+	src/net/tunnel_runtime.c \
+	src/net/tunnel_link.c \
+	src/net/tunnel_config.c \
+	src/net/socks5.c \
+	src/net/verify.c \
+	src/net/http1.c \
+	src/net/http2.c \
+	src/net/observation.c \
+	src/net/profile.c \
+	src/net/request_gate.c \
+	src/net/probe_http.c \
+	$(TLS_CAPABILITY_SRC) \
+	src/net/tls13.c \
+	src/net/tls12.c \
+	src/net/tls_hello.c \
+	src/net/tls_fp.c \
+	src/net/tls_cert.c \
+	$(CRYPTO_SRC) \
+	src/core/perm.c \
+	src/core/util.c
+
 OFFLINE_TEST_BINS := $(TEST_BIN) $(CRYPTO_TEST_BIN) $(TLS_TEST_BIN) \
+                     $(BROWSER_HELLO_TEST_BIN) \
                      $(PROP_TEST_BIN) $(ENGINE_FAULT_TEST_BIN) \
                      $(VERIFY_FAULT_TEST_BIN) $(EXPORT_TEST_BIN) \
                      $(TASK_TEST_BIN) $(OUTBUF_TEST_BIN) $(SCREEN_TEST_BIN) \
-                     $(DISCOVER_TEST_BIN) $(SCAN_PLAN_TEST_BIN) \
-                     $(SCAN_EDITOR_TEST_BIN) $(INPUT_TEST_BIN)
+			     $(DISCOVER_TEST_BIN) $(SCAN_PLAN_TEST_BIN) \
+			     $(SCAN_EDITOR_TEST_BIN) $(INPUT_TEST_BIN) $(TUNNEL_TEST_BIN) \
+			     $(TUNNEL_RUNTIME_TEST_BIN)
 
 TEST_BINS := $(OFFLINE_TEST_BINS) $(ENGINE_TEST_BIN) $(VERIFY_TEST_BIN)
 
@@ -454,7 +515,8 @@ endif
 .PHONY: all debug sanitize-test sanitize-offline-test tsan tsan-test \
         tsan-offline-test strict strict-test strict-offline-test analyze test \
         test-build offline-test offline-test-build bench-crypto \
-        bench-tls-verify menu-test tls-test fuzz fuzz-smoke check clean install \
+        bench-tls-verify menu-test install-docs-test tls-test fuzz fuzz-smoke \
+        tunnel-local-test check clean install \
         uninstall run fmt config-fingerprint force
 
 all: $(BIN)
@@ -562,7 +624,10 @@ bench-crypto: $(CRYPTO_BENCH_BIN)
 bench-tls-verify: $(TLS_VERIFY_BENCH_BIN)
 	$(TLS_VERIFY_BENCH_BIN) $(BENCH_TLS_ARGS)
 
-menu-test: strict
+install-docs-test:
+	@sh scripts/check_install_docs.sh
+
+menu-test: strict install-docs-test
 	@python3 tests/test_menu_pty.py build-strict/qanat
 
 $(TEST_BIN): $(TEST_SRC)
@@ -593,6 +658,10 @@ $(TLS_VERIFY_BENCH_BIN): $(TLS_VERIFY_BENCH_SRC)
 $(TLS_TEST_BIN): $(TLS_TEST_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) $(ALL_CFLAGS) -Isrc/net $(TLS_TEST_SRC) -o $@ $(LDFLAGS)
+
+$(BROWSER_HELLO_TEST_BIN): $(BROWSER_HELLO_TEST_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) $(BROWSER_HELLO_TEST_SRC) -o $@ $(LDFLAGS)
 
 $(PROP_TEST_BIN): $(PROP_TEST_SRC)
 	@mkdir -p $(dir $@)
@@ -646,15 +715,29 @@ $(SCAN_EDITOR_TEST_BIN): $(SCAN_EDITOR_TEST_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) $(ALL_CFLAGS) $(SCAN_EDITOR_TEST_SRC) -o $@ $(LDFLAGS)
 
+$(TUNNEL_TEST_BIN): $(TUNNEL_TEST_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) $(TUNNEL_TEST_SRC) -o $@ $(LDFLAGS)
+
+$(TUNNEL_RUNTIME_TEST_BIN): $(TUNNEL_RUNTIME_TEST_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(ALL_CFLAGS) -DQN_TUNNEL_TESTING $(TUNNEL_RUNTIME_TEST_SRC) \
+		-o $@ $(LDFLAGS)
+
 tls-test:
 	@sh scripts/test_tls_local.sh
 
-FUZZ_TARGETS := fuzz_http fuzz_http1 fuzz_http2 fuzz_tls_classify fuzz_cidr fuzz_tls_session
+tunnel-local-test: $(TUNNEL_RUNTIME_TEST_BIN)
+	@sh scripts/test_tunnel_local.sh $(TUNNEL_RUNTIME_TEST_BIN)
+
+FUZZ_TARGETS := fuzz_http fuzz_http1 fuzz_http2 fuzz_tls_classify fuzz_cidr \
+	fuzz_tls_session fuzz_tunnel_link
 FUZZ_LIB := \
 	$(CRYPTO_SRC) \
 	src/core/arena.c src/core/cidr.c src/core/perm.c src/core/util.c \
 	src/net/probe_http.c src/net/probe_tls.c src/net/http1.c src/net/http2.c \
 	src/net/profile.c \
+	src/net/tunnel_link.c \
 	$(TLS_CAPABILITY_SRC) \
 	src/net/tls13.c src/net/tls12.c src/net/tls_hello.c src/net/tls_fp.c src/net/tls_cert.c
 

@@ -165,8 +165,7 @@ static bool decode_csi(qn_input *input, qn_key *out)
         default: break;
         }
     }
-    /* Well-framed and fully consumed, but not a key we act on: emit nothing.
-       Reporting it as text would type a stray character into the UI. */
+    /* Ignore a complete unsupported CSI instead of typing a stray character. */
     return false;
 }
 

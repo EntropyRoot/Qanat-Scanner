@@ -75,20 +75,43 @@ Run the following commands **one line at a time**:
 ```bash
 pkg update -y
 pkg install -y clang make git curl openssl
-git clone https://github.com/EntropyRoot/Qanat-Scanner.git
-cd Qanat
+git clone https://github.com/EntropyRoot/Qanat-Scanner.git Qanat-Scanner
+cd Qanat-Scanner
 make NATIVE=1
-./build/qanat --version
+make install
+hash -r
+qanat --version
+qanat doctor
 ```
 
 `NATIVE=1` enables `-mcpu=native` on an ARM64 phone. The release profile also uses `-O3`, section garbage collection, and ThinLTO with Clang.
 
-Install the executable in the Termux prefix:
+The explicit clone destination and the following `cd` must match. `make
+install` replaces the command in the Termux prefix; compiling alone does not
+update an older `qanat` already found through `PATH`.
+
+### Updating an Existing Checkout
+
+Do not run `git clone` again when `~/Qanat-Scanner` already exists. Clone
+creates a new checkout; it does not update the installed executable. Inspect
+the existing tree, fast-forward it, rebuild, and install it:
 
 ```bash
+cd "$HOME/Qanat-Scanner"
+git status --short
+git remote -v
+git pull --ff-only
+make NATIVE=1
 make install
+hash -r
 qanat --version
 ```
+
+Stop if `cd` fails, the remote is not the expected repository, the worktree has
+changes you do not understand, or `git pull --ff-only` refuses. Do not delete
+the old directory to hide one of those conditions. To diagnose a stale
+launcher without changing anything, run `type -a qanat`, `qanat --version`, and
+`ls -l "$PREFIX/bin/qanat"`.
 
 Neither build nor installation requires root.
 
@@ -159,6 +182,8 @@ Run the binary without arguments in a terminal:
 ```
 
 The numbered main menu offers `1) CDN analyzer`, `2) Host scanner`, and `3) LAN and network tools`. The CDN settings contain a dedicated **Scan Plan** page. From the TUI alone, users can select Auto, Full Range, Percentage, Fixed Address Budget, or Reachable Target; choose Uniform, Stratified, Adaptive, or Hybrid selection; set candidate capacity, total finalists including All Candidates, output Top-N, three independent concurrency limits, ranking, and memory budget; save the settings; and inspect the resolved range, memory, FD, candidate, finalist, and verification-batch plan before starting. A very large full traversal requires explicit confirmation.
+
+On phone terminals 48 through 71 columns wide, Scan Plan uses a scrollable single-panel layout. Review then shows a compact Resource Plan containing the same validated totals, pipeline limits, concurrency, memory, and FD evidence as the wide two-panel layout. A terminal is rejected only when the usable body is smaller than 48x12; Qanat never invents a larger size.
 
 The launcher is only used when standard input and output are terminals. Scripts, pipes, and redirected runs keep the existing headless CLI behavior.
 
@@ -335,7 +360,20 @@ The browser-shaped profiles are selected with:
 --fingerprint random
 ```
 
-One immutable `qn_profile_instance` supplies ClientHello wire bytes, JA3/JA4 preview, HTTP/2 settings, HTTP/1 shape, verifier behavior, and export metadata. Built-in profiles advertise only cipher suites, groups, key shares, signature algorithms, ALPN paths, and retry behavior implemented by this binary. `fingerprint list`, `fingerprint show`, and `fingerprint diff` inspect that exact contract; the same profile, seed, and SNI produce the same preview and wire bytes.
+The fixed names are `chrome-android-151`, `firefox-android-153`, and
+`safari-ios-26`; the short and previous versioned names remain aliases. One
+immutable `qn_profile_instance` supplies the TLS/HTTP persona and a fresh wire
+seed supplies per-connection GREASE, Chrome extension permutation, ECH padding,
+randoms, and keys. Explicit seed plus connection index is reproducible.
+
+Chrome 151 and Firefox 153 TLS and HTTP/1 fixtures were captured from the
+connected Android phone through bounded localhost collectors. Safari 26 is
+source/reference-derived because no iOS device was sampled. The browser offer
+may include legacy branches outside Qanat's bounded executor; selecting one
+returns typed `unsupported`. See the sanitized
+[Android TLS fixture](docs/evidence/android-clienthello-2026-08-12.json),
+[Android HTTP fixture](docs/evidence/android-http1-2026-08-12.json), and
+[direct Cloudflare evidence](docs/evidence/cloudflare-tls-2026-08-12.json).
 
 ### Verdicts and Trust Boundary
 
@@ -362,6 +400,38 @@ Failure verdicts describe observations, not censorship or its cause. Firewall po
 
 Read [TLS scope](docs/TLS.md) before using these results for research or operational decisions.
 
+### Optional End-to-End Tunnel Verification
+
+Tunnel verification is off by default because it contacts the user's proxy
+server and the public Internet. The numbered launcher exposes it under
+`CDN Scanner -> Tunnel verification`, including hidden link input, a private
+link-file path, Xray discovery/path selection, and an explicit Xray installer.
+The installer is a separate confirmed network operation: on AArch64 it fetches
+the official Android ARM64 release plus its `.dgst`, verifies SHA-256, and only
+then installs the executable under `$PREFIX/bin` or `$HOME/.local/bin`.
+
+For headless use, keep the credential out of the process list by using a mode
+`0600` file and explicitly authorize traffic:
+
+```sh
+chmod 600 tunnel.link
+qanat --cf --headless \
+  --tunnel-target 5 --tunnel-concurrency 2 --tunnel-attempts 2 \
+  --tunnel-link-file tunnel.link --xray auto --tunnel-confirm \
+  --json results.json
+```
+
+Qanat substitutes only each candidate address. The original SNI, Host,
+transport, path/service, ALPN, fingerprint and credential remain the user's
+identity. It starts external Xray with a private temporary config, performs its
+own SOCKS5 CONNECT, and sends `GET /cdn-cgi/trace` through Qanat's TLS stack.
+Success requires HTTP 2xx plus `colo=`. Missing Xray is reported as
+`binary-missing`; it is never an empty success or a scan failure.
+
+The final order distinguishes `passed`, `untested`/`binary-missing`, and known
+tunnel failures. The TUI and JSON/CSV exports include tunnel status, attempts,
+TTFB, optional throughput and a bounded reason; credentials are never emitted.
+
 ### Using Confirmed CDN Candidates with Xray or sing-box
 
 Qanat can emit a deliberately incomplete template after a Cloudflare scan:
@@ -376,7 +446,12 @@ Qanat can emit a deliberately incomplete template after a Cloudflare scan:
 
 The `list`, `xray`, and `singbox` exporters now include only records whose deep verification completed and whose verdict is `cf-marker-observed` or higher. A handshake-only, timeout, reset, unsupported, or preliminary result is never promoted into a tunnel template.
 
-The template is not a ready credential or a guarantee that your origin works. The SNI/Host must be a domain you control and have configured through the CDN; when the scan used the default public `www.cloudflare.com`, the exporter deliberately writes `REPLACE_SNI` instead. Replace `REPLACE_UUID` and `REPLACE_PATH`, and adapt the generated WebSocket transport if your deployment uses XHTTP, gRPC, or another transport. These CDN candidates are not generic REALITY destinations. Qanat verifies the CDN marker path, not your private tunnel authentication or origin routing.
+Without a tunnel link, Xray export remains an explicit `REPLACE_*` template.
+When a link is configured, the same config builder used by live verification
+emits the real transport and identity but replaces only the credential with
+`<redacted>`. Runtime-only private configs are directly usable and are always
+deleted after the child is reaped. These CDN candidates are not generic REALITY
+destinations.
 
 ## Local IPv4 Discovery
 
@@ -439,7 +514,7 @@ Start with automatic settings. They inspect CPU topology and the current file-de
 ## Output and Reproducibility
 
 - **Headless text:** compact rows suitable for pipes and shell tools.
-- **JSON schema 6:** build fingerprint, stable range digest and metadata, resolved scan plan, complete accounting, candidate/finalist/output counts, profile and score versions, score components, typed failure evidence, exact RTT metrics, and ranked records. `verification_completed` is terminal accounting, not a success flag. For a confirmed CDN observation, require `cf-marker-observed` or a higher marker-derived verdict.
+- **JSON schema 7:** schema 6 fields plus the bounded tunnel plan and accounting, per-record tunnel status/TTFB/throughput/reason, and score version 3. Readers of schema 6 should initialize tunnel state to `untested`; readers must still reject unknown future schemas.
 - **CSV:** spreadsheet-friendly result tables; banner formula prefixes are neutralized.
 - **Tunnel templates:** marker-confirmed candidates only, with conspicuous credential/path placeholders.
 - **Event log:** append-only detailed finalist observations, including TLS version, cipher, connect/handshake/TTFB timing, flow, idle hold, and certificate display fields.
@@ -472,7 +547,7 @@ Performance claims should include the exact command, device/SoC, Android and Ter
 
 ## Quality Gates
 
-The repository contains seven deterministic suites, cryptographic known-answer vectors, TLS 1.2/1.3 loopback interoperability tests against OpenSSL, an adversarial loopback peer for reset/silence/garbage/early-EOF behavior, pseudo-terminal coverage for the numeric launcher, a whole-application GCC analyzer gate, sanitizer profiles, ThreadSanitizer coverage for the lock-free engine, six parser/session fuzz targets, an AArch64 cross-build with emulated crypto-extension vectors, and Android NDK/bionic builds at API 24 and 30.
+The repository contains nineteen host suites, including seventeen offline-only suites, cryptographic known-answer vectors, TLS 1.2/1.3 loopback interoperability tests against OpenSSL, adversarial loopback peers for transport and SOCKS5 failures, pseudo-terminal coverage for the numeric launcher, a whole-application GCC analyzer gate, sanitizer profiles, ThreadSanitizer coverage for the lock-free engine, seven parser/session fuzz targets, an AArch64 cross-build with crypto differential and ABI suites, and Android NDK/bionic builds at API 24 and 30.
 
 These checks improve confidence but do not replace real-device validation or an independent cryptographic/security audit. See [Contributing](CONTRIBUTING.md) for the expected validation matrix.
 

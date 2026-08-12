@@ -167,6 +167,20 @@ static bool output_finish(qn_output *out)
     return ok;
 }
 
+static void output_abort(qn_output *out)
+{
+    if (!out)
+        return;
+    if (out->owned) {
+        if (out->f)
+            (void)fclose(out->f);
+        if (out->tmp)
+            (void)unlink(out->tmp);
+        free(out->tmp);
+    }
+    memset(out, 0, sizeof *out);
+}
+
 static qn_run_outcome output_outcome(bool persisted)
 {
     return persisted ? QN_RUN_SUCCESS : QN_RUN_INCOMPLETE;
@@ -349,6 +363,8 @@ qn_run_outcome qn_export_json(const char *path, const cf_scan *cf,
                 "\"finalists_all\": %s, \"output_limit\": %llu, "
                 "\"output_all\": %s, \"scan_concurrency\": %u, "
                 "\"verify_concurrency\": %u, \"stability_concurrency\": %u, "
+                "\"tunnel_enabled\": %s, \"tunnel_target\": %llu, "
+                "\"tunnel_concurrency\": %u, \"tunnel_attempts\": %u, "
                 "\"verification_batch_size\": %u, \"memory_budget_bytes\": %llu, "
                 "\"estimated_candidate_bytes\": %llu, "
                 "\"estimated_verifier_bytes\": %llu, "
@@ -369,6 +385,9 @@ qn_run_outcome qn_export_json(const char *path, const cf_scan *cf,
                 (unsigned long long)plan->output_limit,
                 plan->output_all ? "true" : "false", plan->scan_concurrency,
                 plan->verify_concurrency, plan->stability_concurrency,
+                plan->tunnel_enabled ? "true" : "false",
+                (unsigned long long)plan->tunnel_target,
+                plan->tunnel_concurrency, plan->tunnel_attempts,
                 plan->verification_batch_size,
                 (unsigned long long)plan->memory_budget_bytes,
                 (unsigned long long)plan->estimated_candidate_bytes,
@@ -391,7 +410,9 @@ qn_run_outcome qn_export_json(const char *path, const cf_scan *cf,
                 "\"candidate_truncated\": %s, \"finalists_queued\": %u, "
                 "\"calibration_cohort\": %u, "
                 "\"finalists_verified\": %u, \"verified_endpoints\": %u, "
-                "\"output_results\": %u},\n",
+                "\"output_results\": %u, \"tunnel_queued\": %u, "
+                "\"tunnel_passed\": %u, \"tunnel_failed\": %u, "
+                "\"tunnel_skipped\": %u},\n",
                 (unsigned long long)cf->sweep_stats.claimed,
                 (unsigned long long)cf->sweep_stats.issued,
                 (unsigned long long)cf->sweep_stats.completed,
@@ -405,7 +426,11 @@ qn_run_outcome qn_export_json(const char *path, const cf_scan *cf,
                 (unsigned long long)cf->late_reachable_discarded,
                 cf->candidate_truncated ? "true" : "false", cf->nfinalist,
                 cf->ncalibration,
-                cf->verify_completed, cf->edges, output_n);
+                cf->verify_completed, cf->edges, output_n,
+                atomic_load_explicit(&cf->tunnel_queued, memory_order_acquire),
+                atomic_load_explicit(&cf->tunnel_passed, memory_order_acquire),
+                atomic_load_explicit(&cf->tunnel_failed, memory_order_acquire),
+                atomic_load_explicit(&cf->tunnel_skipped, memory_order_acquire));
         fprintf(f, "    \"profile\": {\"version\": %u, \"requested\": ",
                 profile ? profile->version : 0u);
         json_str(f, profile ? qn_tls_fp_str(profile->requested) : "unavailable");
@@ -454,12 +479,13 @@ qn_run_outcome qn_export_json(const char *path, const cf_scan *cf,
             fprintf(f,
                     ", \"http_status\": %u, \"score\": %u, \"score_version\": %u, "
                     "\"score_components\": {\"edge\": %u, \"latency\": %u, "
-                    "\"stability\": %u, \"confidence\": %u, \"throughput\": %u}, "
+                    "\"stability\": %u, \"confidence\": %u, \"throughput\": %u, "
+                    "\"tunnel\": %u}, "
                     "\"confidence\": %u, "
                     "\"verification_completed\": %s, \"failure_origin\": ",
                     r->http_status, r->score, r->score_version, r->score_edge,
                     r->score_latency, r->score_stability, r->score_confidence,
-                    r->score_throughput, r->confidence,
+                    r->score_throughput, r->score_tunnel, r->confidence,
                     r->verified ? "true" : "false");
             json_str(f, qn_failure_origin_str((qn_failure_origin)r->failure_origin));
             fprintf(f, ", \"transport_result\": ");
@@ -475,6 +501,12 @@ qn_run_outcome qn_export_json(const char *path, const cf_scan *cf,
             json_str(f, r->alpn);
             fprintf(f, ", \"reason\": ");
             json_str(f, r->verify_reason);
+            fprintf(f, ", \"tunnel_status\": ");
+            json_str(f, qn_tunnel_state_str((qn_tunnel_state)r->tunnel_state));
+            fprintf(f, ", \"tunnel_ttfb_us\": %u, \"tunnel_kbps\": %u, "
+                       "\"tunnel_attempts\": %u, \"tunnel_reason\": ",
+                    r->tunnel_ttfb_us, r->tunnel_kbps, r->tunnel_attempts);
+            json_str(f, r->tunnel_reason);
             emitted++;
             fprintf(f, "}%s\n", emitted < output_n ? "," : "");
         }
@@ -585,7 +617,8 @@ qn_run_outcome qn_export_csv(const char *path, const cf_scan *cf,
                    "rtt_min_us,rtt_median_us,rtt_p90_us,rtt_ci90_lo_us,"
                    "rtt_ci90_hi_us,mean_consecutive_rtt_delta_us,loss_pct,colo,score,"
                    "score_version,score_edge,score_latency,score_stability,"
-                   "score_confidence,score_throughput\n");
+                   "score_confidence,score_throughput,score_tunnel,tunnel_status,"
+                   "tunnel_ttfb_us,tunnel_kbps,tunnel_attempts,tunnel_reason\n");
         uint32_t emitted = 0u;
         for (uint32_t i = 0; i < cf->n && emitted < output_n; i++) {
             const cf_record *r = &cf->rec[i];
@@ -603,11 +636,15 @@ qn_run_outcome qn_export_csv(const char *path, const cf_scan *cf,
                 fprintf(f, "%u,%u,", r->rtt_ci90_lo_us, r->rtt_ci90_hi_us);
             else
                 fprintf(f, ",,");
-            fprintf(f, "%u,%u,%s,%u,%u,%u,%u,%u,%u,%u\n",
+            fprintf(f, "%u,%u,%s,%u,%u,%u,%u,%u,%u,%u,%u,%s,%u,%u,%u,",
                     r->rtt_delta_mean_us, r->loss_pct,
                     r->colo[0] ? r->colo : "", r->score, r->score_version,
                     r->score_edge, r->score_latency, r->score_stability,
-                    r->score_confidence, r->score_throughput);
+                    r->score_confidence, r->score_throughput, r->score_tunnel,
+                    qn_tunnel_state_str((qn_tunnel_state)r->tunnel_state),
+                    r->tunnel_ttfb_us, r->tunnel_kbps, r->tunnel_attempts);
+            csv_str(f, r->tunnel_reason, false);
+            fputc('\n', f);
             emitted++;
         }
     }
@@ -700,6 +737,10 @@ qn_run_outcome qn_export_config(const char *path, uint8_t fmt, const cf_scan *cf
     if (!n) {
         if (fmt == XP_LIST)
             fprintf(f, "# no verified address exposed a Cloudflare marker; nothing to export\n");
+        else if (fmt == XP_XRAY)
+            fprintf(f,
+                    "{\n  \"_comment\": \"no verified address exposed a Cloudflare marker\",\n"
+                    "  \"configs\": []\n}\n");
         else
             fprintf(f,
                     "{\n  \"_comment\": \"no verified address exposed a Cloudflare marker\",\n"
@@ -728,45 +769,66 @@ qn_run_outcome qn_export_config(const char *path, uint8_t fmt, const cf_scan *cf
         return output_outcome(output_finish(&output));
     }
 
-    /* Preserve measured fields while forcing the default public SNI to be replaced. */
     if (fmt == XP_XRAY) {
-        fprintf(f, "{\n  \"_comment\": \"qanat export: replace REPLACE_* with your own\",\n");
+        qn_tunnel_link link;
+        qn_tunnel_config_mode mode;
+        qn_tunnel_parse_code parse_code = QN_TUNNEL_PARSE_OK;
+
+        memset(&link, 0, sizeof link);
+        if (cf->cfg->tunnel_link) {
+            parse_code = qn_tunnel_link_parse_cstr(cf->cfg->tunnel_link, &link);
+            mode = QN_TUNNEL_CONFIG_REDACTED;
+        } else {
+            link.protocol = QN_TUNNEL_PROTOCOL_VLESS;
+            link.network = QN_TUNNEL_NETWORK_WS;
+            link.security = QN_TUNNEL_SECURITY_TLS;
+            link.port = 443u;
+            qn_strlcpy(link.address, "origin.invalid", sizeof link.address);
+            qn_strlcpy(link.sni, template_sni, sizeof link.sni);
+            qn_strlcpy(link.host, template_sni, sizeof link.host);
+            qn_strlcpy(link.path, "/REPLACE_PATH", sizeof link.path);
+            qn_strlcpy(link.fingerprint, fp, sizeof link.fingerprint);
+            qn_strlcpy(link.mode, "auto", sizeof link.mode);
+            mode = QN_TUNNEL_CONFIG_TEMPLATE;
+        }
+        if (parse_code != QN_TUNNEL_PARSE_OK) {
+            qn_tunnel_link_clear(&link);
+            output_abort(&output);
+            return QN_RUN_FAILED;
+        }
+        fprintf(f, "{\n  \"_comment\": ");
+        json_str(f, mode == QN_TUNNEL_CONFIG_TEMPLATE
+                        ? "qanat templates; provide a tunnel link for real settings"
+                        : "qanat configs; credentials intentionally redacted");
+        fprintf(f, ",\n");
         fprintf(f, "  \"_build_fingerprint\": \"" QN_BUILD_FINGERPRINT "\",\n");
-        fprintf(f, "  \"outbounds\": [\n");
+        fprintf(f, "  \"xray_runtime\": \"external-optional\",\n");
+        fprintf(f, "  \"configs\": [\n");
         emitted = 0u;
         for (uint32_t i = 0u; i < cf->n && emitted < n; i++) {
             const cf_record *record = &cf->rec[i];
+            qn_tunnel_config_request request;
+            char config[QN_TUNNEL_CONFIG_MAX];
+            size_t config_length;
 
             if (!config_exportable(record))
                 continue;
             qn_addr_str(&record->addr, addr, sizeof addr);
-            fprintf(f,
-                    "    {\n"
-                    "      \"tag\": \"qanat-%u\",\n"
-                    "      \"protocol\": \"vless\",\n"
-                    "      \"settings\": { \"vnext\": [ { \"address\": ",
-                    emitted);
-            json_str(f, addr);
-            fprintf(f,
-                    ", \"port\": 443,\n"
-                    "        \"users\": [ { \"id\": \"REPLACE_UUID\", \"encryption\": \"none\","
-                    " \"flow\": \"\" } ] } ] },\n"
-                    "      \"streamSettings\": {\n"
-                    "        \"network\": \"ws\",\n"
-                    "        \"security\": \"tls\",\n"
-                    "        \"tlsSettings\": { \"serverName\": ");
-            json_str(f, template_sni);
-            fprintf(f, ", \"fingerprint\": ");
-            json_str(f, fp);
-            fprintf(f,
-                    ", \"allowInsecure\": false },\n"
-                    "        \"wsSettings\": { \"path\": \"REPLACE_PATH\","
-                    " \"headers\": { \"Host\": ");
-            json_str(f, template_sni);
-            fprintf(f, " } }\n      }\n    }%s\n", emitted + 1u < n ? "," : "");
+            request = (qn_tunnel_config_request){
+                &link, addr, (uint16_t)(21080u + emitted), mode
+            };
+            if (qn_tunnel_config_build(&request, config, sizeof config,
+                                       &config_length) != QN_TUNNEL_CONFIG_OK ||
+                config_length != strlen(config)) {
+                qn_tunnel_link_clear(&link);
+                output_abort(&output);
+                return QN_RUN_FAILED;
+            }
+            fprintf(f, "    %s%s\n", config, emitted + 1u < n ? "," : "");
             emitted++;
         }
         fprintf(f, "  ]\n}\n");
+        qn_tunnel_link_clear(&link);
         return output_outcome(output_finish(&output));
     }
 

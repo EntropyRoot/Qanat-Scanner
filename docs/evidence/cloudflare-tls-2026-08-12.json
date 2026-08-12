@@ -1,0 +1,59 @@
+{
+  "schema": 2,
+  "captured_at": "2026-08-12",
+  "target": "speed.cloudflare.com:443",
+  "resolved_ipv4": "172.66.0.218",
+  "scope": "Direct Qanat TCP/TLS handshakes from WSL; no proxy or phone setting used.",
+  "privacy": "Public target and normalized protocol facts only; no local address or key material retained.",
+  "samples": [
+    {
+      "profile": "chrome-android-151",
+      "client_hello_length": 1832,
+      "ja3": "dd99dab430ccbb91d3f01b37695a222b",
+      "ja4": "t13d1516h2_8daaf6152771_806a8c22fdea",
+      "tls_version": 772,
+      "cipher_suite": 4865,
+      "key_share_group": 4588,
+      "alpn": "http/1.1",
+      "ech_retry_configs": true,
+      "certificate_state": "opaque-brotli-framing",
+      "certificate_compression_algorithm": 2,
+      "http_status": 200
+    },
+    {
+      "profile": "firefox-android-153",
+      "client_hello_length": 1899,
+      "ja3": "c43da27af379abb70ab285d8ef656f71",
+      "ja4": "t13d1616h2_86a278354501_eeeea6562960",
+      "tls_version": 772,
+      "cipher_suite": 4865,
+      "key_share_group": 4588,
+      "alpn": "http/1.1",
+      "ech_retry_configs": true,
+      "certificate_state": "opaque-brotli-framing",
+      "certificate_compression_algorithm": 2,
+      "http_status": 200
+    },
+    {
+      "profile": "safari-ios-26",
+      "client_hello_length": 1543,
+      "ja3": "ecdf4f49dd59effc439639da29186671",
+      "ja4": "t13d2013h2_a09f3c656075_f189be0cf21e",
+      "tls_version": 772,
+      "cipher_suite": 4866,
+      "key_share_group": 4588,
+      "alpn": "http/1.1",
+      "ech_retry_configs": false,
+      "certificate_state": "parsed-uncompressed",
+      "certificate_compression_algorithm": 0,
+      "http_status": 200
+    }
+  ],
+  "sample_note": "Fresh per-connection GREASE and ECH padding make the Chrome ClientHello length and JA3 sample-specific; JA4 remains shape-stable.",
+  "reference_check": {
+    "client": "OpenSSL s_client",
+    "offered_alpn": ["h2", "http/1.1"],
+    "selected_alpn": "http/1.1",
+    "note": "The endpoint made the same ALPN choice for the reference client."
+  }
+}

@@ -5,11 +5,18 @@
 #include <string.h>
 
 static int build_hello(uint8_t *buf, size_t cap, const char *sni, qn_rng *rng,
-                       qn_tls_fp fp, bool allow_tls12, uint64_t grease_seed,
-                       bool fixed_grease)
+                       qn_tls_fp fp, bool allow_tls12, uint64_t grease_salt)
 {
     qn_hello_req  req;
     qn_hello_info info;
+    qn_hello_key_share shares[3];
+    uint8_t material[QN_HYBRID_CLIENT_SHARE_LEN + QN_X25519_LEN +
+                     QN_P256_PUBLIC_LEN + QN_X25519_LEN + QN_ECH_PAYLOAD_MAX];
+    uint8_t *hybrid = material;
+    uint8_t *x25519 = hybrid + QN_HYBRID_CLIENT_SHARE_LEN;
+    uint8_t *p256 = x25519 + QN_X25519_LEN;
+    uint8_t *ech_enc = p256 + QN_P256_PUBLIC_LEN;
+    uint8_t *ech_payload = ech_enc + QN_X25519_LEN;
 
     if (!buf || !cap || !sni)
         return -1;
@@ -22,19 +29,32 @@ static int build_hello(uint8_t *buf, size_t cap, const char *sni, qn_rng *rng,
     req.allow_tls12 = allow_tls12;
 
     if (rng) {
+        req.grease_seed = qn_rng_next(rng);
         qn_rng_bytes(rng, req.random, sizeof req.random);
         qn_rng_bytes(rng, req.session_id, sizeof req.session_id);
-        qn_rng_bytes(rng, req.key_share, sizeof req.key_share);
-        req.grease_seed = fixed_grease ? grease_seed : qn_rng_next(rng);
-    } else if (!qn_random_secure(req.random, sizeof req.random) ||
+        qn_rng_bytes(rng, material, sizeof material);
+    } else if (!qn_random_secure(&req.grease_seed, sizeof req.grease_seed) ||
+               !qn_random_secure(req.random, sizeof req.random) ||
                !qn_random_secure(req.session_id, sizeof req.session_id) ||
-               !qn_random_secure(req.key_share, sizeof req.key_share) ||
-               (!fixed_grease &&
-                !qn_random_secure(&req.grease_seed, sizeof req.grease_seed))) {
+               !qn_random_secure(material, sizeof material)) {
         return -1;
     }
-    if (fixed_grease)
-        req.grease_seed = grease_seed;
+    req.grease_seed ^= grease_salt;
+
+    p256[0] = 0x04u;
+    shares[0] = (qn_hello_key_share){ QN_GROUP_X25519_MLKEM768, hybrid,
+                                      QN_HYBRID_CLIENT_SHARE_LEN };
+    shares[1] = (qn_hello_key_share){ QN_GROUP_X25519, x25519, QN_X25519_LEN };
+    shares[2] = (qn_hello_key_share){ QN_GROUP_P256, p256, QN_P256_PUBLIC_LEN };
+    req.key_shares = shares;
+    req.key_shares_n = (uint8_t)QN_ARRAY_LEN(shares);
+    req.ech_config_id = (uint8_t)(req.grease_seed >> 8);
+    req.ech_aead = fp == QN_TLS_FP_FIREFOX ? 0x0003u : 0x0001u;
+    memcpy(req.ech_enc, ech_enc, QN_X25519_LEN);
+    req.ech_payload = ech_payload;
+    req.ech_payload_len = fp == QN_TLS_FP_CHROME
+                              ? (uint16_t)(144u + 32u * (req.grease_seed & 3u))
+                              : (uint16_t)(QN_ECH_PAYLOAD_MAX - 1u);
 
     return qn_tls_hello_build(&req, buf, cap, &info);
 }
@@ -44,7 +64,7 @@ int qn_tls_build_hello(uint8_t *buf, size_t cap, const char *sni, qn_rng *rng,
 {
     if (fp == QN_TLS_FP_RANDOM)
         return -1;
-    return build_hello(buf, cap, sni, rng, fp, true, 0u, false);
+    return build_hello(buf, cap, sni, rng, fp, true, 0u);
 }
 
 int qn_tls_build_hello_instance(uint8_t *buf, size_t cap,
@@ -54,7 +74,7 @@ int qn_tls_build_hello_instance(uint8_t *buf, size_t cap,
         profile->support == QN_PROFILE_UNSUPPORTED)
         return -1;
     return build_hello(buf, cap, profile->sni, rng, profile->resolved,
-                       profile->allow_tls12, profile->grease_seed, true);
+                       profile->allow_tls12, profile->grease_seed);
 }
 
 qn_tls_outcome qn_tls_classify(const uint8_t *buf, size_t len)

@@ -5,9 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define QN_SCAN_PLAN_VERSION 1u
-#define QN_SCAN_SETTINGS_VERSION 1u
-#define QN_SCORE_VERSION     2u
+#define QN_SCAN_PLAN_VERSION 2u
+#define QN_SCAN_SETTINGS_VERSION 2u
+#define QN_SCORE_VERSION     3u
 #define QN_COVERAGE_SCALE    UINT32_C(1000000)
 
 typedef enum {
@@ -55,6 +55,9 @@ typedef struct {
     uint32_t            scan_concurrency;
     uint32_t            verify_concurrency;
     uint32_t            stability_concurrency;
+    uint64_t            tunnel_target;
+    uint32_t            tunnel_concurrency;
+    uint32_t            tunnel_attempts;
     bool                candidate_auto;
     bool                finalists_auto;
     bool                finalists_all;
@@ -63,6 +66,8 @@ typedef struct {
     bool                scan_concurrency_auto;
     bool                verify_concurrency_auto;
     bool                stability_concurrency_auto;
+    bool                tunnel_enabled;
+    bool                tunnel_all;
 } qn_scan_request;
 
 #define QN_SCAN_REQUEST_INIT                                                        \
@@ -72,7 +77,8 @@ typedef struct {
         .explore_percent = 20u, .candidate_auto = true, .finalists_auto = true,    \
         .output_limit = 20u, .memory_auto = true,                                  \
         .scan_concurrency_auto = true, .verify_concurrency_auto = true,             \
-        .stability_concurrency_auto = true                                          \
+        .stability_concurrency_auto = true, .tunnel_concurrency = 1u,               \
+        .tunnel_attempts = 2u                                                       \
     }
 
 typedef struct {
@@ -112,6 +118,7 @@ typedef struct {
     uint64_t            memory_budget_bytes;
     uint64_t            estimated_candidate_bytes;
     uint64_t            estimated_verifier_bytes;
+    uint64_t            estimated_tunnel_bytes;
     uint64_t            estimated_working_bytes;
     uint64_t            estimated_total_bytes;
     uint64_t            fd_limit;
@@ -119,6 +126,9 @@ typedef struct {
     uint32_t            scan_concurrency;
     uint32_t            verify_concurrency;
     uint32_t            stability_concurrency;
+    uint64_t            tunnel_target;
+    uint32_t            tunnel_concurrency;
+    uint32_t            tunnel_attempts;
     uint32_t            verification_batch_size;
     uint32_t            input_prefixes;
     uint32_t            normalized_prefixes;
@@ -129,6 +139,8 @@ typedef struct {
     bool                representative;
     bool                exact_full;
     bool                auto_adjusted;
+    bool                tunnel_enabled;
+    bool                tunnel_all;
     bool                valid;
     char                error[192];
 } qn_scan_plan;

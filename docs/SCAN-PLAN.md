@@ -1,7 +1,7 @@
 # Qanat scan-plan architecture
 
-This note describes the production contract implemented by scan-plan version 1,
-profile-instance version 1, score version 2, and JSON export schema 6. The
+This note describes the production contract implemented by scan-plan version 2,
+profile-instance version 1, score version 3, and JSON export schema 7. The
 validated `qn_scan_plan` is the only resolved plan consumed by the CLI, TUI,
 Cloudflare task, verifier, progress views, and exporter.
 
@@ -105,7 +105,7 @@ The calibration cohort is normally four times the finalist count, with at least
 32 extra candidates when available. Sweep minimum RTT samples are cleared
 before robust calibration. Median, nearest-rank p90, loss, consecutive-sample
 jitter, confidence, marker evidence, optional throughput, and stability feed
-score version 2. One lucky minimum RTT cannot win against consistently better
+score version 3. One lucky minimum RTT cannot win against consistently better
 evidence. Diversity selection prevents one noisy block from consuming the
 whole finalist set, and address order is the final deterministic tie-break.
 
@@ -168,17 +168,20 @@ shows a truthful small-terminal state. Signal handlers request shutdown; normal
 cleanup restores termios, cursor, alternate screen, and signal dispositions on
 every exit path.
 
-## Schema 6 migration
+## Schema 7 migration
 
-Schema 6 adds `build_fingerprint`, `range_snapshot`, the resolved `scan_plan`,
-full sweep and pipeline accounting, profile version/support, score version and
-components, and candidate truncation/replacement counters. Consumers must:
+Schema 7 retains schema 6 and adds tunnel plan/accounting, per-record tunnel
+measurements and score version 3. Consumers must:
 
 1. reject or explicitly migrate unknown future schema versions;
-2. use `scan_plan.planned_addresses` as the progress denominator for coverage
+2. when reading schema 6, initialize tunnel state to `untested`, tunnel
+   timings and attempts to zero, and the reason to an empty string;
+3. recompute final ordering under score version 3 instead of comparing stored
+   score version 2 values with new results;
+4. use `scan_plan.planned_addresses` as the progress denominator for coverage
    and budget modes;
-3. treat `result_scope` as authoritative for partial-scan wording;
-4. use `terminal_outcome` and typed origin fields rather than inferring success
+5. treat `result_scope` as authoritative for partial-scan wording;
+6. use `terminal_outcome` and typed origin fields rather than inferring success
    from a non-empty result array;
-5. display only the exported `output_results`, without treating it as the
+7. display only the exported `output_results`, without treating it as the
    finalist or candidate count.

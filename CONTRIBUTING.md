@@ -9,10 +9,15 @@ On Termux:
 ```bash
 pkg update -y
 pkg install -y clang make git openssl
-git clone https://github.com/EntropyRoot/Qanat-Scanner.git
-cd Qanat
+git clone https://github.com/EntropyRoot/Qanat-Scanner.git Qanat-Scanner
+cd Qanat-Scanner
 make NATIVE=1
+make install
 ```
+
+For an existing checkout, inspect `git status --short` and use `git pull
+--ff-only`; do not clone again over another directory and then build a stale
+checkout.
 
 Current Linux systems are supported for development and CI. Portable scalar paths allow x86-64 testing, but any performance claim for Android must also be measured on at least one real ARM64 phone.
 

@@ -39,6 +39,10 @@ const char *qn_scan_field_label(qn_scan_field field)
     case QN_SCAN_FIELD_SCAN_CONCURRENCY:      return "Scan Concurrency";
     case QN_SCAN_FIELD_VERIFY_CONCURRENCY:    return "Verify Concurrency";
     case QN_SCAN_FIELD_STABILITY_CONCURRENCY: return "Stability Concurrency";
+    case QN_SCAN_FIELD_TUNNEL_STAGE:          return "Tunnel Verification";
+    case QN_SCAN_FIELD_TUNNEL_TARGET:         return "Tunnel Target";
+    case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:    return "Tunnel Concurrency";
+    case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:       return "Tunnel Attempts";
     case QN_SCAN_FIELD_MEMORY:                return "Memory Budget";
     case QN_SCAN_FIELD_REVIEW:                return "Review / Start";
     default:                                  return "Invalid";
@@ -66,6 +70,11 @@ const char *qn_scan_field_group(qn_scan_field field)
     case QN_SCAN_FIELD_VERIFY_CONCURRENCY:
     case QN_SCAN_FIELD_STABILITY_CONCURRENCY:
         return "CONCURRENCY";
+    case QN_SCAN_FIELD_TUNNEL_STAGE:
+    case QN_SCAN_FIELD_TUNNEL_TARGET:
+    case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:
+    case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:
+        return "TUNNEL VERIFICATION";
     case QN_SCAN_FIELD_MEMORY: return "RESOURCE BUDGET";
     case QN_SCAN_FIELD_REVIEW: return "SUMMARY";
     default:                   return "";
@@ -81,6 +90,9 @@ bool qn_scan_field_active(qn_scan_field field, const qn_scan_request *request)
     case QN_SCAN_FIELD_ADDRESS_BUDGET:   return request->mode == QN_SCAN_BUDGET;
     case QN_SCAN_FIELD_REACHABLE_TARGET: return request->mode == QN_SCAN_REACHABLE;
     case QN_SCAN_FIELD_EXPLORE:          return request->selection == QN_SELECTION_HYBRID;
+    case QN_SCAN_FIELD_TUNNEL_TARGET:
+    case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:
+    case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:  return request->tunnel_enabled;
     default:                             return true;
     }
 }
@@ -98,6 +110,9 @@ bool qn_scan_field_editable(qn_scan_field field)
     case QN_SCAN_FIELD_SCAN_CONCURRENCY:
     case QN_SCAN_FIELD_VERIFY_CONCURRENCY:
     case QN_SCAN_FIELD_STABILITY_CONCURRENCY:
+    case QN_SCAN_FIELD_TUNNEL_TARGET:
+    case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:
+    case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:
     case QN_SCAN_FIELD_MEMORY:
         return true;
     default:
@@ -169,6 +184,17 @@ int qn_scan_field_value(const qn_scan_editor *editor, const qn_scan_request *req
         return request->stability_concurrency_auto
                    ? snprintf(buffer, capacity, "Auto")
                    : snprintf(buffer, capacity, "%u", request->stability_concurrency);
+    case QN_SCAN_FIELD_TUNNEL_STAGE:
+        return snprintf(buffer, capacity, "%s",
+                        request->tunnel_enabled ? "Enabled" : "Off");
+    case QN_SCAN_FIELD_TUNNEL_TARGET:
+        return request->tunnel_all
+                   ? snprintf(buffer, capacity, "All Finalists")
+                   : snprintf(buffer, capacity, "%" PRIu64, request->tunnel_target);
+    case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:
+        return snprintf(buffer, capacity, "%u", request->tunnel_concurrency);
+    case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:
+        return snprintf(buffer, capacity, "%u", request->tunnel_attempts);
     case QN_SCAN_FIELD_MEMORY:
         return request->memory_auto
                    ? snprintf(buffer, capacity, "Auto")
@@ -231,6 +257,11 @@ static void cycle_field(qn_scan_editor *editor, qn_scan_request *request, int di
     static const uint64_t stability_concurrency[] = {
         0u, 32u, 64u, 128u, 256u, 512u, 1024u
     };
+    static const uint64_t tunnel_target[] = {
+        1u, 2u, 5u, 10u, 20u, 50u, UINT64_MAX
+    };
+    static const uint64_t tunnel_concurrency[] = { 1u, 2u, 4u, 8u, 16u, 32u };
+    static const uint64_t tunnel_attempts[] = { 1u, 2u };
     static const uint64_t memory[] = {
         0u, 64u * QN_EDITOR_MIB, 128u * QN_EDITOR_MIB,
         256u * QN_EDITOR_MIB, 512u * QN_EDITOR_MIB
@@ -251,6 +282,11 @@ static void cycle_field(qn_scan_editor *editor, qn_scan_request *request, int di
         break;
     case QN_SCAN_FIELD_RANK:
         request->rank_by = (qn_rank_policy)(((int)request->rank_by + direction + 4) % 4);
+        break;
+    case QN_SCAN_FIELD_TUNNEL_STAGE:
+        request->tunnel_enabled = !request->tunnel_enabled;
+        if (request->tunnel_enabled && !request->tunnel_target)
+            request->tunnel_target = 5u;
         break;
     case QN_SCAN_FIELD_COVERAGE:
         request->coverage_ppm = (uint32_t)cycle_value(
@@ -324,6 +360,27 @@ static void cycle_field(qn_scan_editor *editor, qn_scan_request *request, int di
         request->stability_concurrency_auto = value == 0u;
         if (value)
             request->stability_concurrency = (uint32_t)value;
+        break;
+    case QN_SCAN_FIELD_TUNNEL_TARGET:
+        value = cycle_value(tunnel_target,
+                            sizeof tunnel_target / sizeof tunnel_target[0],
+                            request->tunnel_all ? UINT64_MAX
+                                                : request->tunnel_target,
+                            direction);
+        request->tunnel_all = value == UINT64_MAX;
+        if (!request->tunnel_all)
+            request->tunnel_target = value;
+        break;
+    case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:
+        request->tunnel_concurrency = (uint32_t)cycle_value(
+            tunnel_concurrency,
+            sizeof tunnel_concurrency / sizeof tunnel_concurrency[0],
+            request->tunnel_concurrency, direction);
+        break;
+    case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:
+        request->tunnel_attempts = (uint32_t)cycle_value(
+            tunnel_attempts, sizeof tunnel_attempts / sizeof tunnel_attempts[0],
+            request->tunnel_attempts, direction);
         break;
     case QN_SCAN_FIELD_MEMORY:
         value = cycle_value(memory, sizeof memory / sizeof memory[0],
@@ -431,6 +488,29 @@ static bool commit_edit(qn_scan_editor *editor, qn_scan_request *request,
                 goto bounded;
             request->stability_concurrency_auto = false;
             request->stability_concurrency = (uint32_t)value;
+            break;
+        case QN_SCAN_FIELD_TUNNEL_TARGET:
+            if (!value || value > UINT32_MAX)
+                goto bounded;
+            request->tunnel_enabled = true;
+            request->tunnel_all = false;
+            request->tunnel_target = value;
+            break;
+        case QN_SCAN_FIELD_TUNNEL_CONCURRENCY:
+            if (!value || value > 32u) {
+                editor_message(message, message_capacity,
+                               "Tunnel Concurrency must be from 1 to 32");
+                return false;
+            }
+            request->tunnel_concurrency = (uint32_t)value;
+            break;
+        case QN_SCAN_FIELD_TUNNEL_ATTEMPTS:
+            if (!value || value > 2u) {
+                editor_message(message, message_capacity,
+                               "Tunnel Attempts must be from 1 to 2");
+                return false;
+            }
+            request->tunnel_attempts = (uint32_t)value;
             break;
         case QN_SCAN_FIELD_MEMORY:
             if (!value || value > UINT64_MAX / QN_EDITOR_MIB) {

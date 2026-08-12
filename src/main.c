@@ -8,11 +8,13 @@
 #include "qanat/ranges.h"
 #include "qanat/task.h"
 #include "qanat/tls.h"
+#include "qanat/tls_capability.h"
 #include "qanat/tls_hello.h"
 #include "qanat/ui.h"
 #include "qanat/verify.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +52,14 @@ typedef enum {
     SO_FINALISTS,
     SO_OUTPUT_TOP,
     SO_RANK_BY,
-    SO_MEMORY_BUDGET
+    SO_MEMORY_BUDGET,
+    SO_TUNNEL_TARGET,
+    SO_TUNNEL_CONCURRENCY,
+    SO_TUNNEL_ATTEMPTS,
+    SO_TUNNEL_LINK,
+    SO_TUNNEL_LINK_FILE,
+    SO_XRAY_PATH,
+    SO_TUNNEL_CONFIRM
 } scan_option_id;
 
 typedef struct {
@@ -58,20 +67,28 @@ typedef struct {
     scan_option_id id;
     const char    *value;
     const char    *description;
+    bool           takes_value;
 } scan_option;
 
 static const scan_option SCAN_OPTIONS[] = {
-    { "--scan-mode", SO_SCAN_MODE, "auto|full|coverage|budget|reachable", "traversal and stop policy" },
-    { "--coverage", SO_COVERAGE, "PERCENT", "fixed-point percentage, 0.01%..100%" },
-    { "--address-budget", SO_ADDRESS_BUDGET, "N", "unique addresses to attempt" },
-    { "--reachable-target", SO_REACHABLE_TARGET, "N", "successful reachable candidates to retain" },
-    { "--selection", SO_SELECTION, "uniform|stratified|adaptive|hybrid", "address-selection policy" },
-    { "--explore-percent", SO_EXPLORE_PERCENT, "PERCENT", "hybrid exploration share, 0..100" },
-    { "--candidate-cap", SO_CANDIDATE_CAP, "N|auto", "streaming promising-candidate capacity" },
-    { "--finalists", SO_FINALISTS, "N|auto|all", "total deep-verification cohort" },
-    { "--output-top", SO_OUTPUT_TOP, "N|all", "results displayed and exported" },
-    { "--rank-by", SO_RANK_BY, "balanced|latency|stability|throughput", "versioned final ranking" },
-    { "--memory-budget", SO_MEMORY_BUDGET, "SIZE|auto", "hard resource-plan memory ceiling" }
+    { "--scan-mode", SO_SCAN_MODE, "auto|full|coverage|budget|reachable", "traversal and stop policy", true },
+    { "--coverage", SO_COVERAGE, "PERCENT", "fixed-point percentage, 0.01%..100%", true },
+    { "--address-budget", SO_ADDRESS_BUDGET, "N", "unique addresses to attempt", true },
+    { "--reachable-target", SO_REACHABLE_TARGET, "N", "successful reachable candidates to retain", true },
+    { "--selection", SO_SELECTION, "uniform|stratified|adaptive|hybrid", "address-selection policy", true },
+    { "--explore-percent", SO_EXPLORE_PERCENT, "PERCENT", "hybrid exploration share, 0..100", true },
+    { "--candidate-cap", SO_CANDIDATE_CAP, "N|auto", "streaming promising-candidate capacity", true },
+    { "--finalists", SO_FINALISTS, "N|auto|all", "total deep-verification cohort", true },
+    { "--output-top", SO_OUTPUT_TOP, "N|all", "results displayed and exported", true },
+    { "--rank-by", SO_RANK_BY, "balanced|latency|stability|throughput", "versioned final ranking", true },
+    { "--memory-budget", SO_MEMORY_BUDGET, "SIZE|auto", "hard resource-plan memory ceiling", true },
+    { "--tunnel-target", SO_TUNNEL_TARGET, "N|all", "explicitly enable tunnel verification", true },
+    { "--tunnel-concurrency", SO_TUNNEL_CONCURRENCY, "N", "independent tunnel concurrency, 1..32", true },
+    { "--tunnel-attempts", SO_TUNNEL_ATTEMPTS, "N", "attempts per tunnel candidate, 1..2", true },
+    { "--tunnel-link", SO_TUNNEL_LINK, "URI", "VLESS/Trojan/VMess link; file is safer", true },
+    { "--tunnel-link-file", SO_TUNNEL_LINK_FILE, "FILE", "private file containing one link", true },
+    { "--xray", SO_XRAY_PATH, "PATH|auto", "Xray executable or PATH discovery", true },
+    { "--tunnel-confirm", SO_TUNNEL_CONFIRM, "", "confirm real tunnel traffic in headless mode", false }
 };
 
 static const scan_option *scan_option_find(const char *name)
@@ -117,8 +134,8 @@ static void usage(FILE *f)
         "      --samples <n>    RTT evidence budget per finalist (default: 5)\n"
         "                       clear cases stop early; ambiguous ones may use up to\n"
         "                       min(12, 2*n) measurement rounds\n"
-        "      --fingerprint <p> chrome-android-126, firefox-android-127,\n"
-        "                       safari-ios-17, random (short aliases accepted)\n"
+        "      --fingerprint <p> chrome-android-151, firefox-android-153,\n"
+        "                       safari-ios-26, random (short aliases accepted)\n"
         "      --cert-strict    refuse a compressed certificate instead of accepting\n"
         "                       its framing without reading the chain\n"
         "      --flow-bytes <n> bulk bytes to pull for a throughput reading (default: off).\n"
@@ -209,6 +226,8 @@ static bool parse_scan_option(const scan_option *option, const char *value,
     uint64_t count;
     uint32_t percent;
 
+    if (!option || !value || !config || !seen)
+        return false;
     switch (option->id) {
     case SO_SCAN_MODE:
         if (!qn_scan_mode_parse(value, &config->scan.mode)) {
@@ -314,6 +333,49 @@ static bool parse_scan_option(const scan_option *option, const char *value,
         }
         config->scan.memory_auto = false;
         config->scan.memory_budget_bytes = count;
+        return true;
+    case SO_TUNNEL_TARGET:
+        config->scan.tunnel_enabled = true;
+        config->scan.tunnel_all = !strcmp(value, "all");
+        if (config->scan.tunnel_all) {
+            config->scan.tunnel_target = 0u;
+            return true;
+        }
+        if (!arg_count(value, &count)) {
+            qn_warn("--tunnel-target takes all or an integer from 1 through 4294967295");
+            return false;
+        }
+        config->scan.tunnel_target = count;
+        return true;
+    case SO_TUNNEL_CONCURRENCY:
+        if (!arg_u32(value, &percent, 1u, 32u)) {
+            qn_warn("--tunnel-concurrency takes an integer from 1 through 32");
+            return false;
+        }
+        config->scan.tunnel_concurrency = percent;
+        return true;
+    case SO_TUNNEL_ATTEMPTS:
+        if (!arg_u32(value, &percent, 1u, 2u)) {
+            qn_warn("--tunnel-attempts takes an integer from 1 through 2");
+            return false;
+        }
+        config->scan.tunnel_attempts = percent;
+        return true;
+    case SO_TUNNEL_LINK:
+        if (strlen(value) > QN_TUNNEL_LINK_MAX) {
+            qn_warn("--tunnel-link exceeds the bounded link length");
+            return false;
+        }
+        config->tunnel_link = value;
+        return true;
+    case SO_TUNNEL_LINK_FILE:
+        config->tunnel_link_file = value;
+        return true;
+    case SO_XRAY_PATH:
+        config->xray_path = value;
+        return true;
+    case SO_TUNNEL_CONFIRM:
+        config->tunnel_confirmed = true;
         return true;
     default:
         return false;
@@ -479,6 +541,23 @@ static bool validate_options(const qn_config *c, uint32_t seen)
         qn_warn("--export-file requires --export");
         return false;
     }
+    if (c->scan.tunnel_enabled && !c->tunnel_link && !c->tunnel_link_file) {
+        qn_warn("--tunnel-target requires --tunnel-link or --tunnel-link-file");
+        return false;
+    }
+    if (c->tunnel_link && c->tunnel_link_file) {
+        qn_warn("--tunnel-link and --tunnel-link-file are mutually exclusive");
+        return false;
+    }
+    if (!c->scan.tunnel_enabled &&
+        (c->tunnel_link || c->tunnel_link_file || c->xray_path)) {
+        qn_warn("tunnel link and Xray options require --tunnel-target");
+        return false;
+    }
+    if (c->scan.tunnel_enabled && c->headless && !c->tunnel_confirmed) {
+        qn_warn("headless tunnel traffic requires --tunnel-confirm after reviewing the target");
+        return false;
+    }
     for (size_t i = 0; i < QN_ARRAY_LEN(outputs); i++) {
         if (outputs[i] && !outputs[i][0]) {
             qn_warn("output paths must not be empty");
@@ -499,6 +578,65 @@ static bool validate_options(const qn_config *c, uint32_t seen)
             }
         }
     }
+    return true;
+}
+
+static bool load_tunnel_link(qn_config *config)
+{
+    size_t length = 0u;
+    qn_tunnel_link parsed;
+    qn_tunnel_parse_code code;
+
+    if (!config->scan.tunnel_enabled)
+        return true;
+    if (config->tunnel_link_file) {
+        struct stat status;
+        int fd = open(config->tunnel_link_file,
+                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        bool read_ok = true;
+
+        if (fd < 0) {
+            qn_warn("could not open tunnel link file");
+            return false;
+        }
+        if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
+            status.st_uid != geteuid() || (status.st_mode & 077u) != 0u) {
+            (void)close(fd);
+            qn_warn("tunnel link file must be owned by this user and mode 600 or stricter");
+            return false;
+        }
+        while (length <= QN_TUNNEL_LINK_MAX) {
+            ssize_t got = read(fd, config->input_tunnel_link + length,
+                               QN_TUNNEL_LINK_MAX + 1u - length);
+
+            if (got < 0 && errno == EINTR)
+                continue;
+            if (got < 0) {
+                read_ok = false;
+                break;
+            }
+            if (!got)
+                break;
+            length += (size_t)got;
+        }
+        if (close(fd) != 0)
+            read_ok = false;
+        if (!read_ok || length > QN_TUNNEL_LINK_MAX) {
+            qn_warn("tunnel link file is unreadable or exceeds the bound");
+            return false;
+        }
+        while (length && (config->input_tunnel_link[length - 1u] == '\n' ||
+                          config->input_tunnel_link[length - 1u] == '\r'))
+            length--;
+        config->input_tunnel_link[length] = '\0';
+        config->tunnel_link = config->input_tunnel_link;
+    }
+    code = qn_tunnel_link_parse_cstr(config->tunnel_link, &parsed);
+    if (code != QN_TUNNEL_PARSE_OK) {
+        qn_warn("tunnel link rejected: %s", qn_tunnel_parse_str(code));
+        return false;
+    }
+    qn_tunnel_link_clear(&parsed);
     return true;
 }
 
@@ -538,9 +676,14 @@ static bool parse_args(int argc, char **argv, qn_config *c, uint32_t *seen)
             const scan_option *option = scan_option_find(s);
 
             if (option) {
+                const char *value = "";
+
                 *seen |= SEEN_CF;
-                NEED_ARG(option->name);
-                if (!parse_scan_option(option, argv[++i], c, seen))
+                if (option->takes_value) {
+                    NEED_ARG(option->name);
+                    value = argv[++i];
+                }
+                if (!parse_scan_option(option, value, c, seen))
                     return false;
                 continue;
             }
@@ -1091,6 +1234,18 @@ finish_results:
             outcome = qn_run_outcome_worst(outcome,
                                            qn_verify_run_outcome(verify_state));
         }
+        if (outcome != QN_RUN_FAILED && cfg->scan_plan.tunnel_enabled) {
+            qn_run_outcome tunnel = cf_scan_tunnel(&cf);
+
+            outcome = qn_run_outcome_worst(outcome, tunnel);
+            if (!cfg->quiet)
+                fprintf(stderr,
+                        "  tunnel     queued=%u passed=%u failed=%u skipped=%u\n",
+                        atomic_load_explicit(&cf.tunnel_queued, memory_order_acquire),
+                        atomic_load_explicit(&cf.tunnel_passed, memory_order_acquire),
+                        atomic_load_explicit(&cf.tunnel_failed, memory_order_acquire),
+                        atomic_load_explicit(&cf.tunnel_skipped, memory_order_acquire));
+        }
         cf_scan_finish(&cf);
         if (cf.io_warn[0]) {
             qn_warn("%s", cf.io_warn);
@@ -1117,9 +1272,12 @@ finish_results:
                     printf("ci90=[%u-%u]us\t", r->rtt_ci90_lo_us, r->rtt_ci90_hi_us);
                 else
                     printf("ci90=n/a\t");
-                printf("n=%u\tdelta_mean=%uus\tloss=%u%%\t%s\tconf=%u\tscore=%u\n",
+                printf("n=%u\tdelta_mean=%uus\tloss=%u%%\t%s\tconf=%u\t"
+                       "tunnel=%s\ttunnel_ttfb=%uus\tscore=%u\n",
                        r->samples.n, r->rtt_delta_mean_us, r->loss_pct,
-                       r->colo[0] ? r->colo : "-", r->confidence, r->score);
+                       r->colo[0] ? r->colo : "-", r->confidence,
+                       qn_tunnel_state_str((qn_tunnel_state)r->tunnel_state),
+                       r->tunnel_ttfb_us, r->score);
             }
         }
         break;
@@ -1217,13 +1375,26 @@ static const char *header_name(uint8_t header)
     case QN_HEADER_USER_AGENT:      return "user-agent";
     case QN_HEADER_ACCEPT:          return "accept";
     case QN_HEADER_ACCEPT_ENCODING: return "accept-encoding";
+    case QN_HEADER_ACCEPT_LANGUAGE: return "accept-language";
+    case QN_HEADER_UPGRADE_INSECURE: return "upgrade-insecure-requests";
+    case QN_HEADER_SEC_FETCH_DEST:   return "sec-fetch-dest";
+    case QN_HEADER_SEC_FETCH_MODE:   return "sec-fetch-mode";
+    case QN_HEADER_SEC_FETCH_SITE:   return "sec-fetch-site";
+    case QN_HEADER_SEC_FETCH_USER:   return "sec-fetch-user";
+    case QN_HEADER_SEC_CH_UA:        return "sec-ch-ua";
+    case QN_HEADER_SEC_CH_UA_MOBILE: return "sec-ch-ua-mobile";
+    case QN_HEADER_SEC_CH_UA_PLATFORM: return "sec-ch-ua-platform";
+    case QN_HEADER_PRIORITY:         return "priority";
+    case QN_HEADER_TE:               return "te";
     default:                        return "invalid";
     }
 }
 
 typedef struct {
-    qn_profile_instance instance;
-    qn_hello_info       hello_info;
+    qn_profile_instance  instance;
+    qn_hello_info        hello_info;
+    /* Read off the hello that was actually built, never off the profile table. */
+    qn_capability_report capability;
     uint8_t hello[4096], preface[256], headers[2048], http1[2048];
     size_t hello_n, preface_n, headers_n, http1_n;
     char ja3_string[QN_JA3_STR_MAX], ja3[33], ja4[40];
@@ -1263,6 +1434,8 @@ static bool fingerprint_snapshot_build(const char *name, uint64_t run_seed,
         !qn_tls_ja4(&snapshot->hello_info, snapshot->ja4) ||
         strcmp(snapshot->ja3, tls.ja3) != 0 || strcmp(snapshot->ja4, tls.ja4) != 0)
         goto out;
+    qn_tls_capability_assess(&snapshot->hello_info, snapshot->instance.allow_tls12,
+                             &snapshot->capability);
     n = qn_h2_preface_instance(&snapshot->instance, snapshot->preface,
                                 sizeof snapshot->preface);
     if (n <= 0)
@@ -1296,9 +1469,21 @@ static int fingerprint_show(const char *name, uint64_t seed, const char *host)
         return 3;
     }
     profile = instance->profile;
+    /* Echo what was asked for, not what it resolved to: a pinned version that
+       no longer exists must be visible, not silently answered with another. */
     printf("requested_profile=%s\nprofile=%s\nsupport=%s\n",
-           qn_tls_fp_str(instance->requested), profile->name,
-           qn_profile_support_str(instance->support));
+           name ? name : "", profile->name,
+           qn_profile_support_str(snapshot.capability.support));
+    if (name && strcmp(name, qn_tls_fp_str(instance->requested)) != 0)
+        printf("alias_of=%s\n", qn_tls_fp_str(instance->requested));
+    printf("capability_gaps=%zu%s\n", snapshot.capability.ngaps,
+           snapshot.capability.truncated ? " (truncated)" : "");
+    for (i = 0; i < snapshot.capability.ngaps; i++) {
+        const qn_capability_gap *gap = &snapshot.capability.gap[i];
+
+        printf("capability_gap=%s 0x%04X %s\n",
+               qn_capability_gap_kind_str(gap->kind), gap->codepoint, gap->reason);
+    }
     printf("profile_instance_version=%u\npeer_authentication=not-verified\n",
            instance->version);
     printf("browser=%s\nplatform=%s\nversion=%s\nsni=%s\n",
@@ -1317,7 +1502,7 @@ static int fingerprint_show(const char *name, uint64_t seed, const char *host)
         printf("%s%s", i ? "," : "", pseudo_name(instance->h2_pseudo_order[i]));
     putchar('\n');
     printf("http_header_order=");
-    for (i = 0; i < QN_ARRAY_LEN(instance->http1_header_order); i++)
+    for (i = 0; i < instance->http1_header_order_n; i++)
         printf("%s%s", i ? "," : "", header_name(instance->http1_header_order[i]));
     putchar('\n');
     print_hex("h2_preface_hex", snapshot.preface, snapshot.preface_n);
@@ -1497,6 +1682,12 @@ static int doctor_command(void)
     printf("tls_profiles=%u/%u\ntls_support=capability-constrained\n"
            "peer_authentication=not-verified\nnetwork_checks=not-run\n",
            profiles_ok, (unsigned)QN_TLS_FP_COUNT);
+    {
+        char xray[QN_TUNNEL_XRAY_PATH_MAX + 1u];
+        qn_xray_find_code xray_state = qn_xray_find("auto", xray, sizeof xray);
+
+        printf("xray_runtime=%s\n", qn_xray_find_str(xray_state));
+    }
     printf("outcome=%s\n", qn_run_outcome_str(outcome));
     return qn_run_exit_code(outcome);
 }
@@ -1530,6 +1721,22 @@ int main(int argc, char **argv)
     }
     if (!validate_options(&cfg, seen))
         return 2;
+    if (!load_tunnel_link(&cfg))
+        return 2;
+    if (cfg.scan.tunnel_enabled) {
+        uint64_t shown_target = cfg.scan.tunnel_all
+                                    ? (cfg.scan.finalists_all
+                                           ? cfg.scan.candidate_capacity
+                                           : cfg.scan.finalist_limit)
+                                    : cfg.scan.tunnel_target;
+
+        fprintf(stderr,
+                "  tunnel     destination=www.cloudflare.com:443 candidates=%s%llu "
+                "concurrency=%u attempts=%u\n",
+                cfg.scan.tunnel_all ? "all; current bound " : "",
+                (unsigned long long)shown_target,
+                cfg.scan.tunnel_concurrency, cfg.scan.tunnel_attempts);
+    }
 
     cfg.effective_seed = cfg.seed_explicit ? cfg.seed : qn_rng_entropy();
 

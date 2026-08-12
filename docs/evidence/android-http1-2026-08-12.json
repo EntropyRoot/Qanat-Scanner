@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "captured_at": "2026-08-12",
+  "capture_scope": "localhost navigation; allowlisted request headers only",
+  "privacy": "Cookie, authorization, referer, history, and non-local URLs are never retained.",
+  "context": "Android ACTION_VIEW navigation to an adb-reversed localhost listener",
+  "samples": [
+    {
+      "profile": "chrome-android-151",
+      "package": "com.android.chrome",
+      "version": "151.0.7922.71",
+      "header_order": [
+        "host", "connection", "sec-ch-ua", "sec-ch-ua-mobile",
+        "sec-ch-ua-platform", "upgrade-insecure-requests", "user-agent",
+        "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+        "accept-encoding", "accept-language"
+      ],
+      "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      "accept_encoding": "gzip, deflate, br, zstd",
+      "accept_language": "fa,en-US;q=0.9,en;q=0.8,de;q=0.7",
+      "sec_ch_ua": "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", \"Chromium\";v=\"151\"",
+      "sec_fetch_site": "cross-site"
+    },
+    {
+      "profile": "firefox-android-153",
+      "package": "org.mozilla.firefox",
+      "version": "153.0.3",
+      "header_order": [
+        "host", "user-agent", "accept", "accept-language", "accept-encoding",
+        "connection", "upgrade-insecure-requests", "sec-fetch-dest",
+        "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "priority"
+      ],
+      "user_agent": "Mozilla/5.0 (Android 13; Mobile; rv:153.0) Gecko/153.0 Firefox/153.0",
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept_encoding": "gzip, deflate, br, zstd",
+      "accept_language": "fa-IR",
+      "sec_fetch_site": "none",
+      "priority": "u=0, i"
+    },
+    {
+      "profile": "brave-android-151",
+      "package": "com.brave.browser",
+      "version": "1.93.134",
+      "delta_from_chrome": "Brave brand in sec-ch-ua, no signed-exchange accept token, and en;q=0.5 language in this capture"
+    }
+  ]
+}
