@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [clang, gcc]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain
+        run: ${{ matrix.cc }} --version
+      - name: Strict build
+        run: make CC=${{ matrix.cc }} strict
+      - name: Numeric menu PTY tests
+        run: make CC=${{ matrix.cc }} menu-test
+      - name: Unit tests
+        run: make CC=${{ matrix.cc }} BUILD=build-test LTO= test
+      - name: Handshake against OpenSSL
+        run: make CC=${{ matrix.cc }} tls-test
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Application sanitizer build
+        run: make CC=clang debug
+      - name: Tests under ASan and UBSan
+        run: make CC=clang sanitize-test
+      - name: Handshake under ASan and UBSan
+        run: EXTRA_CFLAGS="-fsanitize=address,undefined" BUILD=build-tlsasan make CC=clang tls-test
+      - name: Local smoke test
+        run: >-
+          timeout 15s ./build-debug/qanat --ports 127.0.0.1 -p 1
+          --headless --quiet --no-warm --no-affinity --no-thermal
+          --timeout 100 --retries 0
+
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The engine is lock-free with hand-placed memory ordering, so TSan is
+      # the sanitizer that matters most for it.
+      - name: Tests under TSan
+        run: make CC=clang tsan-test
+      - name: Engine under TSan
+        run: |
+          make CC=clang tsan
+          TSAN_OPTIONS=halt_on_error=1 timeout 90s ./build-tsan-app/qanat \
+            --ports 127.0.0.1 -p 1-2000 --headless --quiet --no-warm \
+            --no-affinity --no-thermal --timeout 100 --retries 0
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build harnesses
+        run: make CC=clang fuzz
+      - name: Run each target briefly
+        run: |
+          mkdir -p build-fuzz/corpus
+          for t in fuzz_http fuzz_http1 fuzz_http2 fuzz_tls_classify fuzz_cidr fuzz_tls_session; do
+            echo "== $t =="
+            ./build-fuzz/$t -max_total_time=60 -max_len=8192 \
+              -print_final_stats=1 build-fuzz/corpus
+          done
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  arm64-cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install AArch64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+      - name: Compile ARM64, NEON and crypto-extension paths
+        run: make CC=aarch64-linux-gnu-gcc strict
+      - name: Verify target architecture
+        run: file build-strict/qanat | grep -q 'ARM aarch64'
+      # The assembly is only reached when HWCAP advertises the extensions, so
+      # run the vectors under emulation that provides them.
+      - name: Crypto vectors on emulated ARM64
+        run: |
+          make CC=aarch64-linux-gnu-gcc BUILD=build-arm LTO= \
+            build-arm/test_crypto build-arm/test_props
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu max build-arm/test_crypto
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu max build-arm/test_props
+
+  # The cross build above is glibc. Termux and the NDK are bionic, where the
+  # libc surface differs: an entropy call that resolves here can be missing
+  # there. The primary target has to be compiled by the primary toolchain.
+  android-ndk-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          local-cache: true
+      - name: Compile for bionic at the oldest API we claim
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          for api in 24 30; do
+            make clean
+            make CC=$BIN/aarch64-linux-android$api-clang strict
+            file build-strict/qanat | grep -q 'ARM aarch64'
+          done

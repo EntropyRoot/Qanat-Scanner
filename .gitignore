@@ -1,0 +1,9 @@
+/build*/
+*.o
+*.d
+*.pyc
+__pycache__/
+compile_commands.json
+.clangd
+.DS_Store
+qanat-results.*
