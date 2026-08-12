@@ -346,7 +346,7 @@ static void gcm_tag(const qn_aes_gcm *g, const uint8_t j0[16], const uint8_t *aa
     memset(acc, 0, sizeof acc);
 #if defined(__aarch64__)
     if (ghash_ce_ok()) {
-        qn_ghash_gcm_ce(acc, &g->hp[0][0], aad, aadlen, ct, ctlen);
+        qn_ghash_gcm_ce(acc, (const uint8_t *)g->hp, aad, aadlen, ct, ctlen);
     } else
 #endif
     {
@@ -372,12 +372,12 @@ static void ghash_update_ce(const qn_aes_gcm *g, uint8_t acc[16], const uint8_t 
     size_t whole = n & ~(size_t)15u;
 
     if (whole)
-        qn_ghash_ce(acc, &g->hp[0][0], p, whole / 16u);
+        qn_ghash_ce(acc, (const uint8_t *)g->hp, p, whole / 16u);
     if (n != whole) {
         uint8_t last[16] = { 0 };
 
         memcpy(last, p + whole, n - whole);
-        qn_ghash_ce(acc, &g->hp[0][0], last, 1u);
+        qn_ghash_ce(acc, (const uint8_t *)g->hp, last, 1u);
     }
 }
 
@@ -390,10 +390,11 @@ static void gcm_seal_fused(const qn_aes_gcm *g, const uint8_t j0[16], uint8_t ct
     unsigned i;
 
     ghash_update_ce(g, acc, aad, aadlen);
-    qn_aes_gcm_encrypt_ghash_ce(g->rk, g->nr, &g->hp[0][0], ctr, pt, out, ptlen, acc);
+    qn_aes_gcm_encrypt_ghash_ce(g->rk, g->nr, (const uint8_t *)g->hp, ctr, pt, out, ptlen,
+                                acc);
     put_be64(lens, (uint64_t)aadlen << 3);
     put_be64(lens + 8, (uint64_t)ptlen << 3);
-    qn_ghash_ce(acc, &g->hp[0][0], lens, 1u);
+    qn_ghash_ce(acc, (const uint8_t *)g->hp, lens, 1u);
     aes_encrypt_dispatch(g->rk, g->nr, j0, ek);
     for (i = 0; i < 16u; i++)
         out[ptlen + i] = (uint8_t)(acc[i] ^ ek[i]);

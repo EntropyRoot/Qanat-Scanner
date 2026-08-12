@@ -307,7 +307,7 @@ typedef struct {
 #if defined(QN_BENCH_BASELINE)
 #define GCM_HP(g) ((g).h)
 #else
-#define GCM_HP(g) (&(g).hp[0][0])
+#define GCM_HP(g) ((const uint8_t *)(g).hp)
 #endif
 
 static void call_ghash(void *opaque)

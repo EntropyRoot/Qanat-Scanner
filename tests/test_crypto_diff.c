@@ -261,7 +261,7 @@ static void test_aes_gcm_fused(void)
                     guarded_reset(dst_base, cap);
                     memcpy(ctr_got, ctr0, sizeof ctr_got);
                     memcpy(acc_got, initial, sizeof acc_got);
-                    qn_aes_gcm_encrypt_ghash_ce(g.rk, g.nr, &g.hp[0][0], ctr_got,
+                    qn_aes_gcm_encrypt_ghash_ce(g.rk, g.nr, (const uint8_t *)g.hp, ctr_got,
                                                 src_base + src_off, dst_base + out_off, len,
                                                 acc_got);
                     (void)equal_bytes("aes-gcm-fused", len, src_off, dst_off,
@@ -275,7 +275,7 @@ static void test_aes_gcm_fused(void)
                 memcpy(inplace + 16u + src_off, src_base + src_off, len);
                 memcpy(ctr_got, ctr0, sizeof ctr_got);
                 memcpy(acc_got, initial, sizeof acc_got);
-                qn_aes_gcm_encrypt_ghash_ce(g.rk, g.nr, &g.hp[0][0], ctr_got,
+                qn_aes_gcm_encrypt_ghash_ce(g.rk, g.nr, (const uint8_t *)g.hp, ctr_got,
                                             inplace + 16u + src_off,
                                             inplace + 16u + src_off, len, acc_got);
                 (void)equal_bytes("aes-gcm-fused-inplace", len, src_off, src_off,
@@ -324,7 +324,7 @@ static void test_ghash(void)
             for (dst_off = 0; dst_off < 16u; dst_off++) {
                 memset(out, GUARD_BYTE, 64u);
                 memcpy(out + dst_off, initial, sizeof initial);
-                qn_ghash_ce(out + dst_off, &g.hp[0][0], data + src_off, blocks);
+                qn_ghash_ce(out + dst_off, (const uint8_t *)g.hp, data + src_off, blocks);
                 (void)equal_bytes("ghash-blocks", sizeof want, src_off, dst_off,
                                   out + dst_off, want);
                 CHECK(guards_ok(out, dst_off, 16u, 64u));
@@ -340,7 +340,7 @@ static void test_ghash(void)
             qn_ghash_gcm_c(&g, want, data + src_off, aadlen, data + ct_off, ctlen);
             for (dst_off = 0; dst_off < 16u; dst_off++) {
                 memset(out, GUARD_BYTE, 64u);
-                qn_ghash_gcm_ce(out + dst_off, &g.hp[0][0], data + src_off, aadlen,
+                qn_ghash_gcm_ce(out + dst_off, (const uint8_t *)g.hp, data + src_off, aadlen,
                                 data + ct_off, ctlen);
                 (void)equal_bytes("ghash-gcm", 16u, src_off, dst_off,
                                   out + dst_off, want);
