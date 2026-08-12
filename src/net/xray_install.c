@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -153,30 +152,24 @@ static bool extract_xray(const char *unzip, const char *archive,
                          const char *output)
 {
     int fd = open(output, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0700);
-    posix_spawn_file_actions_t actions;
-    char *const arguments[] = {
-        (char *)(uintptr_t)unzip, (char *)"-p",
-        (char *)(uintptr_t)archive, (char *)"xray", NULL
-    };
-    pid_t child = -1;
-    int spawn_error;
+    pid_t child;
 
     if (fd < 0)
         return false;
-    if (posix_spawn_file_actions_init(&actions) != 0) {
+    child = fork();
+    if (child < 0) {
         close(fd);
         return false;
     }
-    spawn_error = posix_spawn_file_actions_adddup2(&actions, fd,
-                                                    STDOUT_FILENO);
-    if (!spawn_error)
-        spawn_error = posix_spawn_file_actions_addclose(&actions, fd);
-    if (!spawn_error)
-        spawn_error = posix_spawn(&child, unzip, &actions, NULL,
-                                  arguments, environ);
-    (void)posix_spawn_file_actions_destroy(&actions);
+    if (!child) {
+        if (dup2(fd, STDOUT_FILENO) < 0)
+            _exit(127);
+        close(fd);
+        execl(unzip, unzip, "-p", archive, "xray", (char *)NULL);
+        _exit(127);
+    }
     close(fd);
-    return !spawn_error && wait_success(child);
+    return wait_success(child);
 }
 
 static bool install_directory(char *directory, size_t capacity, bool create)
