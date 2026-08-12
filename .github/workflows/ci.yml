@@ -116,7 +116,7 @@ jobs:
         id: ndk
         with:
           ndk-version: r27c
-          local-cache: true
+          local-cache: false
       - name: Compile for bionic at the oldest API we claim
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
